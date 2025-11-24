@@ -156,19 +156,24 @@ class MovesenseGATTClient:
 		Connect to a Movesense device by MAC address or by name.
 		For MAC addresses, perform discovery first so BlueZ can resolve the device.
 		"""
+		# Normalize input (strip accidental whitespace/newlines from env or args)
+		address_or_name = (address_or_name or "").strip()
 		target_address = address_or_name
 		ble_device = None
 
 		if ":" in address_or_name:
 			# Resolve MAC by scanning to populate BlueZ cache
+			self._log(f"Attempting MAC-based connect to '{address_or_name}'...")
 			try:
 				ble_device = await BleakScanner.find_device_by_address(address_or_name, timeout=10.0)
 			except Exception:
 				ble_device = None
 			if ble_device is None:
+				self._log("Direct find_device_by_address failed; falling back to discovery scan.")
 				devices = await BleakScanner.discover(timeout=7.0)
 				for d in devices:
 					if d.address.replace("-", ":").lower() == address_or_name.lower():
+						self._log(f"Matched address via discovery: {d.address}")
 						ble_device = d
 						target_address = d.address
 						break

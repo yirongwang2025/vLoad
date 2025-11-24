@@ -5,7 +5,7 @@ import time
 from typing import Set, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,7 +24,6 @@ _ble_client: Optional[MovesenseGATTClient] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 	global _ble_task, _ble_client
-	_ble_task = asyncio.create_task(ble_worker(DEVICE, MODE, RATE))
 	try:
 		yield
 	finally:
@@ -32,6 +31,9 @@ async def lifespan(app: FastAPI):
 			_ble_task.cancel()
 			try:
 				await _ble_task
+			except asyncio.CancelledError:
+				# Expected when cancelling long-running worker
+				pass
 			except Exception:
 				pass
 			_ble_task = None
@@ -67,7 +69,14 @@ INDEX_HTML = """
 </head>
 <body>
   <h2>Movesense Live IMU</h2>
-  <div id="status">Connecting...</div>
+
+  <div style="margin-top: 8px;">
+    <label for="deviceInput"><strong>Device MAC / name:</strong></label>
+    <input id="deviceInput" type="text" size="24" placeholder="74:92:BA:10:F9:00" />
+    <button id="scanBtn">Scan</button>
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn">Disconnect</button>
+  </div>
 
   <div style="margin-top: 10px;">
     <strong>Acceleration (X/Y/Z)</strong>
@@ -83,9 +92,18 @@ INDEX_HTML = """
     <strong>Magnetometer (X/Y/Z)</strong>
     <canvas id="plotMag" width="600" height="140" style="display:block; margin-top:4px; border:1px solid #ddd;"></canvas>
   </div>
+
+  <div style="margin-top: 10px;">
+    <strong>Log</strong>
+    <pre id="logBox" style="height: 160px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #fafafa; font-size: 11px;"></pre>
+  </div>
   <script>
     const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-    const status = document.getElementById('status');
+    const deviceInput = document.getElementById('deviceInput');
+    const scanBtn = document.getElementById('scanBtn');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const logBox = document.getElementById('logBox');
     const canvasAcc = document.getElementById('plotAcc');
     const canvasGyro = document.getElementById('plotGyro');
     const canvasMag = document.getElementById('plotMag');
@@ -93,7 +111,7 @@ INDEX_HTML = """
     const ctxGyro = canvasGyro.getContext('2d');
     const ctxMag = canvasMag.getContext('2d');
 
-    const maxPts = 300;
+    const maxPts = 150;  // number of points kept in history
     // Acceleration series
     const accX = [], accY = [], accZ = [];
     // Gyro series
@@ -103,6 +121,24 @@ INDEX_HTML = """
 
     const colors = ['#1976d2', '#d32f2f', '#388e3c']; // x=blue, y=red, z=green
     let sampleRate = null; // Hz, from server messages
+    let lastDrawTs = 0;    // throttle drawing to avoid overloading CPU
+
+    function addLog(line) {
+      const ts = new Date().toISOString();
+      logBox.textContent += `[${ts}] ${line}\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    // Restore last-used device from localStorage, if any
+    try {
+      const last = localStorage.getItem('vload_last_device');
+      if (last) {
+        deviceInput.value = last;
+        addLog(`Restored last device from storage: ${last}`);
+      }
+    } catch (e) {
+      console.error('localStorage error', e);
+    }
 
     function pushLimited(arr, value) {
       arr.push(value);
@@ -196,6 +232,13 @@ INDEX_HTML = """
     }
 
     function draw() {
+      const now = performance.now();
+      // Limit redraws to ~30 FPS to keep UI smooth even at high IMU rates
+      if (now - lastDrawTs < 33) {
+        requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawTs = now;
       drawSeries(ctxAcc, [accX, accY, accZ]);
       drawSeries(ctxGyro, [gyroX, gyroY, gyroZ]);
       drawSeries(ctxMag, [magX, magY, magZ]);
@@ -203,13 +246,21 @@ INDEX_HTML = """
     }
     requestAnimationFrame(draw);
 
-    ws.onopen = () => { status.textContent = 'Connected'; };
-    ws.onclose = () => { status.textContent = 'Disconnected'; };
-    ws.onerror = () => { status.textContent = 'Error'; };
+    ws.onopen = () => { addLog('WebSocket connected'); };
+    ws.onclose = () => { addLog('WebSocket disconnected'); };
+    ws.onerror = () => { addLog('WebSocket error'); };
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
+
+        // Log-type messages
+        if (msg.type === 'log' && typeof msg.msg === 'string') {
+          addLog(msg.msg);
+          return;
+        }
+
+        // IMU data messages
         if (typeof msg.rate === 'number') {
           sampleRate = msg.rate;
         }
@@ -235,6 +286,80 @@ INDEX_HTML = """
         }
       } catch(e) {
         console.error(e);
+      }
+    };
+
+    // Scan button: call /scan, fill first device into input, and show brief status
+    scanBtn.onclick = async () => {
+      addLog('Scan button clicked: starting scan...');
+      try {
+        const resp = await fetch('/scan');
+        if (!resp.ok) {
+          addLog(`Scan failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        const devices = data.devices || [];
+        if (!devices.length) {
+          addLog('Scan completed: no Movesense devices found');
+          return;
+        }
+        const first = devices[0];
+        deviceInput.value = first.address;
+        addLog(`Scan completed: found ${devices.length} device(s); first=${first.name || first.address} (${first.address})`);
+      } catch (e) {
+        console.error(e);
+        addLog(`Scan error: ${e}`);
+      }
+    };
+
+    // Connect button: POST /connect with the entered device string
+    connectBtn.onclick = async () => {
+      const device = deviceInput.value.trim();
+      if (!device) {
+        addLog('Connect clicked with empty device; please enter an address or scan first.');
+        return;
+      }
+      addLog(`Connect request for ${device}`);
+      try {
+        const resp = await fetch('/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device })
+        });
+        if (!resp.ok) {
+          addLog(`Connect failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        addLog(data.detail || 'Connect request sent');
+
+        // Save last-used device
+        try {
+          localStorage.setItem('vload_last_device', device);
+        } catch (e) {
+          console.error('localStorage set error', e);
+        }
+      } catch (e) {
+        console.error(e);
+        addLog(`Connect error: ${e}`);
+      }
+    };
+
+    // Disconnect button
+    disconnectBtn.onclick = async () => {
+      addLog('Disconnect button clicked');
+      try {
+        const resp = await fetch('/disconnect', { method: 'POST' });
+        if (!resp.ok) {
+          addLog(`Disconnect failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        addLog(data.detail || 'Disconnect request sent');
+      } catch (e) {
+        console.error(e);
+        addLog(`Disconnect error: ${e}`);
       }
     };
   </script>
@@ -282,6 +407,18 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+
+def _log_to_clients(message: str) -> None:
+	"""
+	Send a log line to all connected WebSocket clients.
+	Fire-and-forget; safe to call from non-async code.
+	"""
+	try:
+		asyncio.create_task(manager.broadcast_json({"type": "log", "msg": message}))
+	except RuntimeError:
+		# No running loop yet; ignore
+		pass
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
 	await manager.connect(websocket)
@@ -295,6 +432,86 @@ async def ws_endpoint(websocket: WebSocket):
 		pass
 	finally:
 		await manager.disconnect(websocket)
+
+
+@app.get("/scan")
+async def scan_devices():
+	"""
+	Scan for nearby Movesense devices and return a list of (address, name).
+	"""
+	devices = [
+		{"address": addr, "name": name}
+		async for addr, name in MovesenseGATTClient.scan_for_movesense(timeout=7.0)
+	]
+	return {"devices": devices}
+
+
+@app.post("/connect")
+async def connect_device(payload: Dict[str, Any]):
+	"""
+	Start a BLE worker connected to the specified device (MAC or name).
+	If a worker is already running, it will be cancelled and replaced.
+	"""
+	global _ble_task
+
+	try:
+		device = (payload.get("device") or "").strip()
+		mode = (payload.get("mode") or MODE).strip().upper()
+		rate = int(payload.get("rate") or RATE)
+
+		if not device:
+			raise HTTPException(status_code=400, detail="Missing 'device' in request body.")
+
+		# Cancel any existing worker
+		if _ble_task:
+			_ble_task.cancel()
+			try:
+				await _ble_task
+			except asyncio.CancelledError:
+				# Normal when restarting worker
+				pass
+			except Exception:
+				pass
+			_ble_task = None
+
+		# Start new worker
+		_ble_task = asyncio.create_task(ble_worker(device, mode, rate))
+		return {"detail": f"Connecting to {device} (mode={mode}, rate={rate})"}
+	except HTTPException:
+		# Pass through explicit HTTP errors
+		raise
+	except Exception as e:
+		_log_to_clients(f"/connect error: {e!r}")
+		raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/disconnect")
+async def disconnect_device():
+	"""
+	Stop the current BLE worker (if any) and disconnect the BLE client.
+	"""
+	global _ble_task, _ble_client
+
+	if _ble_task:
+		_ble_task.cancel()
+		try:
+			await _ble_task
+		except asyncio.CancelledError:
+			# Expected when stopping worker
+			pass
+		except Exception:
+			pass
+		_ble_task = None
+
+	if _ble_client:
+		try:
+			await _ble_client.disconnect()
+		except Exception:
+			pass
+		_ble_client = None
+
+	_log_to_clients("BLE worker stopped and client disconnected via /disconnect")
+	return {"detail": "Disconnected BLE worker and client"}
 
 def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 	# Simple derived metrics for demo
@@ -312,28 +529,44 @@ def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 	global _ble_client
 	print(f"[BLE] Worker starting (device={device!r}, mode={mode}, rate={rate})")
+	_log_to_clients(f"BLE worker starting (device={device!r}, mode={mode}, rate={rate})")
 	client = MovesenseGATTClient()
 	_ble_client = client
 
 	try:
 		if device:
-			print(f"[BLE] Connecting to explicit device {device} ...")
-			await client.connect(device)
-		else:
+			try:
+				print(f"[BLE] Connecting to explicit device {device} ...")
+				_log_to_clients(f"Attempting explicit connect to {device} ...")
+				await client.connect(device)
+				_log_to_clients(f"SUCCESS: Connected via explicit device {device}")
+			except Exception as e:
+				print(f"[BLE] Explicit device connect failed ({e}); falling back to auto-scan.")
+				_log_to_clients(f"Explicit connect to {device} failed: {e}. Falling back to auto-scan.")
+				device = None  # fall through to scan logic
+
+		if not device:
 			# Auto-pick first Movesense found
 			print("[BLE] No device specified. Scanning for Movesense devices ...")
+			_log_to_clients("No device specified. Scanning for Movesense devices ...")
 			found = [item async for item in client.scan_for_movesense(timeout=7.0)]
 			print(f"[BLE] Scan complete, found {len(found)} device(s).")
+			_log_to_clients(f"Scan complete, found {len(found)} Movesense device(s).")
 			if not found:
 				print("[BLE] No Movesense devices found during scan.")
+				_log_to_clients("ERROR: No Movesense devices found during scan.")
 				raise RuntimeError("No Movesense devices found. Ensure the sensor is advertising and nearby.")
 			target = found[0]
 			print(f"Auto-selecting device: {target[1]} ({target[0]})")
+			_log_to_clients(f"Connecting via auto-scan to {target[1]} ({target[0]})")
 			await client.connect(target[0])
+			_log_to_clients(f"SUCCESS: Connected via auto-scan to {target[1]} ({target[0]})")
 
 		print("[BLE] Connected. Sending HELLO ...")
+		_log_to_clients("Connected. Sending HELLO ...")
 		await client.hello()
 		print("[BLE] HELLO sent. Subscribing to IMU ...")
+		_log_to_clients("HELLO sent. Subscribing to IMU stream ...")
 
 		def on_data(payload: bytes) -> None:
 			# Try to decode; if decode method not present, fallback to raw hex
@@ -354,6 +587,7 @@ async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 			except Exception:
 				# Log decode problems but keep streaming raw data
 				print(f"[BLE] Failed to decode payload of {len(payload)} bytes; sending raw preview.")
+				_log_to_clients(f"Decode error on payload of {len(payload)} bytes; sending raw preview.")
 				msg = {
 					"t": time.time(),
 					"mode": mode,
@@ -366,15 +600,18 @@ async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 
 		sub = await client.subscribe_imu(sample_rate_hz=rate, mode=mode, on_data=on_data)
 		print("[BLE] Subscribed to IMU stream; entering sleep loop.")
+		_log_to_clients("Subscribed to IMU stream; entering sleep loop.")
 		try:
 			while True:
 				await asyncio.sleep(3600)
 		finally:
 			print("[BLE] Unsubscribing from IMU ...")
+			_log_to_clients("Unsubscribing from IMU ...")
 			await client.unsubscribe(sub)
 	finally:
 		try:
 			print("[BLE] Disconnecting client ...")
+			_log_to_clients("Disconnecting BLE client ...")
 			await _ble_client.disconnect()  # type: ignore
 		except Exception:
 			pass
