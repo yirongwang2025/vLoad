@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Callable, Optional, Iterable, Tuple
+from typing import Callable, Optional, Iterable, Tuple, Dict
 
 from bleak import BleakScanner, BleakClient, BleakError
 
@@ -63,6 +63,8 @@ class MovesenseGATTClient:
 		self._notify_handler_set = False
 		self._user_data_callback: Optional[Callable[[bytes], None]] = None
 		self._next_ref_id = 1
+		# For multi-part GSP frames (e.g., IMU9 uses DATA + DATA_PART2)
+		self._pending_frames: Dict[int, bytes] = {}
 
 	@property
 	def is_connected(self) -> bool:
@@ -375,10 +377,145 @@ class MovesenseGATTClient:
 		return bytes([OPCODE_UNSUBSCRIBE & 0xFF, ref & 0xFF])
 
 	def decode_imu_payload(self, payload: bytes, mode: str) -> dict:
+		"""
+		Decode IMU payloads using the official Movesense GATT SensorData Protocol layout.
+
+		The manufacturer Python example (`gatt_sensordata_app`) shows that IMU9 data is
+		sent in two packets:
+		  - PACKET_TYPE_DATA (2)        → first part, stored
+		  - PACKET_TYPE_DATA_PART2 (3)  → second part, combined with the first
+
+		The combined frame then has the following layout (little endian):
+		  [type:1][ref:1][timestamp:4][data...]
+
+		For IMU9, `data` contains three contiguous arrays of 8 XYZ float triplets:
+		  - 8x acc  (X,Y,Z)
+		  - 8x gyro (X,Y,Z)
+		  - 8x mag  (X,Y,Z)
+
+		We mirror that logic here and fall back to a legacy best‑effort decoder
+		for other packet types or unknown layouts.
+		"""
 		mode_norm = (mode or "").strip().upper()
 		if mode_norm not in ("IMU6", "IMU9"):
 			raise ValueError("mode must be 'IMU6' or 'IMU9'")
 
+		PACKET_TYPE_DATA = 0x02
+		PACKET_TYPE_DATA_PART2 = 0x03
+
+		if not payload:
+			return {"type": None, "ref": None, "seq": None, "timestamp": None, "samples": []}
+
+		packet_type = payload[0]
+		ref = payload[1] if len(payload) > 1 else None
+
+		# Multi-packet handling, per Movesense example:
+		#   - First part: PACKET_TYPE_DATA
+		#   - Second part: PACKET_TYPE_DATA_PART2 (skip its 2‑byte header when joining)
+		if packet_type == PACKET_TYPE_DATA:
+			# Store first part; wait for DATA_PART2
+			if ref is not None:
+				self._pending_frames[ref] = payload
+			return {"type": packet_type, "ref": ref, "seq": None, "timestamp": None, "samples": []}
+
+		if packet_type == PACKET_TYPE_DATA_PART2:
+			if ref is None:
+				# Cannot match without ref; drop
+				return {"type": packet_type, "ref": None, "seq": None, "timestamp": None, "samples": []}
+
+			first_part = self._pending_frames.pop(ref, None)
+			if first_part is None:
+				# We never saw the initial DATA packet; mimic manufacturer example by skipping
+				self._log(f"Warning: Received DATA_PART2 for ref {ref} without prior DATA. Skipping.")
+				return {"type": packet_type, "ref": ref, "seq": None, "timestamp": None, "samples": []}
+
+			# Combine first DATA packet and second DATA_PART2, skipping the second header.
+			full_frame = first_part + payload[2:]
+			return self._decode_gsp_imu_frame(full_frame, mode_norm)
+
+		# Any other packet types (or single-frame layouts) are interpreted using the old
+		# heuristic decoder so that we remain compatible with non‑GSP/legacy firmwares.
+		return self._decode_legacy_imu_payload(payload, mode_norm)
+
+	def _decode_gsp_imu_frame(self, frame: bytes, mode_norm: str) -> dict:
+		"""
+		Decode a complete GSP IMU frame as produced by the manufacturer example.
+
+		Layout (little endian):
+		  [type:1][ref:1][timestamp:4][data...]
+
+		For IMU9 (`mode_norm == "IMU9"`):
+		  - data length is expected to be ~288 bytes
+		  - three blocks of 8 * 3 * 4 bytes:
+		      acc block  = 8 samples of XYZ
+		      gyro block = 8 samples of XYZ
+		      mag block  = 8 samples of XYZ
+
+		For IMU6, we expect two such blocks (acc + gyro) and omit mag.
+		"""
+		if len(frame) < 6:
+			return {"type": None, "ref": None, "seq": None, "timestamp": None, "samples": []}
+
+		packet_type = frame[0]
+		ref = frame[1]
+		timestamp = int.from_bytes(frame[2:6], "little", signed=False)
+
+		data = frame[6:]
+		if not data:
+			return {"type": packet_type, "ref": ref, "seq": None, "timestamp": timestamp, "samples": []}
+
+		# One block = 8 samples * 3 axes * 4 bytes
+		block_bytes = 8 * 3 * 4  # 96
+		data_len = len(data)
+
+		use_mag = False
+		if mode_norm == "IMU9" and data_len >= block_bytes * 3:
+			use_mag = True
+		elif mode_norm == "IMU6" and data_len >= block_bytes * 2:
+			use_mag = False
+		else:
+			# Length does not match the expected pattern; fall back
+			return self._decode_legacy_imu_payload(frame, mode_norm)
+
+		samples = []
+		sample_count = 8
+		gyro_offset = block_bytes
+		mag_offset = block_bytes * 2 if use_mag else None
+
+		for i in range(sample_count):
+			# Per manufacturer example, each "row" starts at:
+			#   offset = 6 + i * 3 * 4
+			base = 6 + i * 3 * 4
+
+			try:
+				ax, ay, az = struct.unpack_from("<fff", frame, base)
+				gx, gy, gz = struct.unpack_from("<fff", frame, base + gyro_offset)
+				mag = None
+				if use_mag and mag_offset is not None:
+					mx, my, mz = struct.unpack_from("<fff", frame, base + mag_offset)
+					mag = [float(mx), float(my), float(mz)]
+			except struct.error:
+				# Truncated frame; stop decoding further samples
+				break
+
+			item = {
+				"acc": [float(ax), float(ay), float(az)],
+				"gyro": [float(gx), float(gy), float(gz)],
+			}
+			if mag is not None:
+				item["mag"] = mag
+			samples.append(item)
+
+		return {"type": packet_type, "ref": ref, "seq": None, "timestamp": timestamp, "samples": samples}
+
+	def _decode_legacy_imu_payload(self, payload: bytes, mode_norm: str) -> dict:
+		"""
+		Best‑effort decoder for legacy/unknown layouts.
+
+		This retains the previous implementation which assumed a flat array of
+		float32 samples with an optional 8‑byte header:
+		  [type:1][ref:1][seq:2][timestamp:4][floats...]
+		"""
 		floats_per_sample = 6 if mode_norm == "IMU6" else 9
 		bytes_per_sample = floats_per_sample * 4
 
