@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Reuse your BLE client
 from movesense_gatt import MovesenseGATTClient
+from modules.jump_detector import JumpDetectorRealtime
 
 DEVICE = os.getenv("MOVE_DEVICE")  # e.g., "74:92:BA:10:F9:00" or exact name
 MODE = os.getenv("MOVE_MODE", "IMU9")  # "IMU6" or "IMU9"
@@ -533,6 +534,13 @@ async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 	client = MovesenseGATTClient()
 	_ble_client = client
 
+	# Phase 1: simple vertical tracking / diagnostics
+	jump_detector = JumpDetectorRealtime(
+		sample_rate_hz=rate,
+		window_seconds=3.0,
+		logger=lambda msg: _log_to_clients(f"[JumpDetector] {msg}"),
+	)
+
 	try:
 		if device:
 			try:
@@ -574,6 +582,24 @@ async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 				decoded = client.decode_imu_payload(payload, mode)  # type: ignore[attr-defined]
 				samples = decoded.get("samples", [])
 				first = samples[0] if samples else None
+
+				# Phase 1: feed samples into jump detector for vertical tracking
+				if samples:
+					now = time.time()
+					for s in samples:
+						try:
+							jump_detector.update(
+								{
+									"t": now,
+									"acc": s.get("acc", []),
+									"gyro": s.get("gyro", []),
+									"mag": s.get("mag", []),
+								}
+							)
+						except Exception:
+							# Never let diagnostics break the BLE stream
+							pass
+
 				msg = {
 					"t": time.time(),
 					"mode": mode,
