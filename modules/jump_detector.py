@@ -6,6 +6,7 @@ from .web_jump_detection import (
 	preprocess_vertical_series,
 	find_vertical_peaks,
 	build_jump_windows,
+	compute_window_metrics,
 )
 
 
@@ -44,6 +45,7 @@ class JumpDetectorRealtime:
 		self._phase2_1_logged: bool = False
 		self._last_phase2_2_log_t: float = 0.0
 		self._last_phase2_3_log_t: float = 0.0
+		self._last_phase2_4_log_t: float = 0.0
 
 		# Phase 2.2 parameters: simple, conservative defaults.
 		# Minimum |az-g| needed to count as a peak (m/s^2).
@@ -160,6 +162,43 @@ class JumpDetectorRealtime:
 					msg += f" (T_f: {flight_times} s{' ...' if len(windows) > 5 else ''})"
 				self.logger(msg)
 				self._last_phase2_3_log_t = now_wall
+
+			# Phase 2.4: every few seconds, derive simple jump metrics
+			# (height and peak rotation speed) for the current candidate
+			# windows and log a compact summary. Still diagnostics only.
+			if self._phase2_1_logged and now_wall - self._last_phase2_4_log_t >= 3.0:
+				stats = preprocess_vertical_series(list(self._buffer))
+				min_dist_samples = max(
+					1, int(self.min_peak_distance_s * self.sample_rate_hz)
+				)
+				peak_indices = find_vertical_peaks(
+					stats,
+					min_height=self.min_peak_height_m_s2,
+					min_distance_samples=min_dist_samples,
+				)
+				windows = build_jump_windows(
+					stats,
+					peak_indices,
+					min_flight_time_s=self.min_flight_time_s,
+					max_flight_time_s=self.max_flight_time_s,
+				)
+				metrics = compute_window_metrics(stats, windows)
+				if metrics:
+					parts = []
+					for m in metrics[:3]:
+						parts.append(
+							f"T_f={m['flight_time']:.3f}s,"
+							f"h={m['height']:.3f}m,"
+							f"ωz={m['peak_gz']:.0f}°/s"
+						)
+					joined = " | ".join(parts)
+					if len(metrics) > 3:
+						joined += " ..."
+					msg = f"[Phase2.4] Jump metrics: {joined}"
+				else:
+					msg = "[Phase2.4] Jump metrics: none in current window"
+				self.logger(msg)
+				self._last_phase2_4_log_t = now_wall
 		except Exception:
 			# Never let Phase 1 diagnostics break the main streaming path.
 			return []

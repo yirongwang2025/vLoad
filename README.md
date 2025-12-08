@@ -143,20 +143,21 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
        - `"[Phase2.2] Peaks in ~T s window: K (min_height=..., min_spacing=...)"`,
        confirming that clear jumps produce more peaks than quiet skating/standing.
 
-3. **Jump‑candidate identification from vertical acceleration (Step 2.3 – IN PROGRESS)**
+3. **Jump‑candidate identification from vertical acceleration (Step 2.3 – COMPLETED)**
    - Use the vertical peaks found in Step 2.2 to form **peak pairs**:
      - Treat earlier peaks as candidate “take‑off” events and later peaks as candidate “landing” events.
      - Accept a pair if the time between peaks lies within a plausible **flight‑time window** (e.g. 0.25–0.8 s, tunable).
-   - Implementation plan:
-     - Add utilities in `modules/web_jump_detection.py` to form candidate windows:
-       - Each window will contain `(i_takeoff, i_landing, t_takeoff, t_landing, T_f)`.
-     - Extend `JumpDetectorRealtime` to:
-       - Periodically log a `[Phase2.3]` summary such as:
-         - `"[Phase2.3] Candidate windows in ~T s: M (flight times: ...)"`,
-         confirming that clear jump sequences produce a small number of clean candidate windows with realistic flight times.
-   - Later in Phase 2, these candidate windows will be refined and scored before being promoted to final jump events.
+   - Implemented in:
+     - `modules/web_jump_detection.py`:
+       - `build_jump_windows(preprocessed, peak_indices, min_flight_time_s, max_flight_time_s)` forms windows with:
+         - `(i_takeoff, i_landing, t_takeoff, t_landing, flight_time)`.
+     - `modules/jump_detector.py` (`JumpDetectorRealtime`):
+       - Every ~2 seconds logs a `[Phase2.3]` summary like:
+         - `"[Phase2.3] Candidate windows in ~T s: M (T_f: ...)"`,
+         confirming that clear jump sequences produce a small number of candidate windows with realistic flight times while quiet motion produces few or none.
+   - Later steps use these windows as the basis for computing jump height and rotation metrics and, eventually, final detected jumps.
 
-4. **Flight time and jump height, from projectile motion**
+4. **Flight time and jump height, from projectile motion (Step 2.4 – IN PROGRESS)**
    - For each accepted jump candidate:
      - Flight time \(T_f\) = time between the two vertical‑acc peaks.
      - Jump height via the same physics used in the paper, e.g.

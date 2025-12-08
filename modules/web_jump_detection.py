@@ -6,6 +6,8 @@ This module currently provides:
   - Phase 2.2: simple peak finding on the gravity‑removed vertical signal.
   - Phase 2.3: utilities for pairing peaks into candidate jump windows and
     computing simple flight‑time information.
+  - Phase 2.4: utilities for deriving basic height / rotation metrics for
+    each candidate window.
 """
 
 from typing import Dict, Any, List
@@ -173,8 +175,8 @@ def build_jump_windows(
 
 			windows.append(
 				{
-					"i_takeoff": float(i),
-					"i_landing": float(j),
+					"i_takeoff": int(i),
+					"i_landing": int(j),
 					"t_takeoff": t_i,
 					"t_landing": t_j,
 					"flight_time": T_f,
@@ -182,5 +184,74 @@ def build_jump_windows(
 			)
 
 	return windows
+
+
+def compute_window_metrics(
+	preprocessed: Dict[str, Any],
+	windows: List[Dict[str, float]],
+	g_m_s2: float = 9.8,
+) -> List[Dict[str, float]]:
+	"""
+	Phase 2.4 – enrich candidate windows with simple jump metrics.
+
+	For each window we compute:
+	  - `height` from flight time using h = g * T_f^2 / 8.
+	  - `peak_az_no_g`: max |a_z - g| within the window.
+	  - `peak_gz`: max |ω_z| within the window.
+	  - `t_peak_gz`: time at which |ω_z| is maximal in the window
+	        (approximate rotation-peak timing).
+	"""
+	if not windows:
+		return []
+
+	t_series = preprocessed.get("t") or []
+	az_no_g = preprocessed.get("az_no_g") or []
+	gz = preprocessed.get("gz") or []
+	n = min(len(t_series), len(az_no_g), len(gz))
+	if n == 0:
+		return []
+
+	out: List[Dict[str, float]] = []
+
+	for w in windows:
+		i0 = int(w.get("i_takeoff", 0))
+		i1 = int(w.get("i_landing", 0))
+		if i0 < 0 or i1 >= n or i1 <= i0:
+			continue
+
+		seg_az = az_no_g[i0 : i1 + 1]
+		seg_gz = gz[i0 : i1 + 1]
+		if not seg_az or not seg_gz:
+			continue
+
+		abs_az = [abs(float(v)) for v in seg_az]
+		abs_gz = [abs(float(v)) for v in seg_gz]
+
+		peak_az_no_g = max(abs_az)
+		peak_gz = max(abs_gz)
+
+		peak_gz_rel_idx = abs_gz.index(peak_gz)
+		peak_gz_idx = i0 + peak_gz_rel_idx
+		t_peak_gz = float(t_series[peak_gz_idx]) if peak_gz_idx < n else float(
+			w.get("t_takeoff", 0.0)
+		)
+
+		T_f = float(w.get("flight_time", 0.0))
+		if T_f < 0.0:
+			continue
+		height = g_m_s2 * (T_f ** 2) / 8.0
+
+		enriched = dict(w)
+		enriched.update(
+			{
+				"height": float(height),
+				"peak_az_no_g": float(peak_az_no_g),
+				"peak_gz": float(peak_gz),
+				"t_peak_gz": t_peak_gz,
+			}
+		)
+		out.append(enriched)
+
+	return out
 
 
