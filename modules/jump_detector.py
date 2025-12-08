@@ -2,6 +2,8 @@ import time
 from collections import deque
 from typing import Deque, Dict, Any, Callable, List, Optional
 
+from .web_jump_detection import preprocess_vertical_series
+
 
 class JumpDetectorRealtime:
 	"""
@@ -34,6 +36,7 @@ class JumpDetectorRealtime:
 		self._buffer: Deque[Dict[str, float]] = deque(maxlen=maxlen)
 
 		self._phase1_logged: bool = False
+		self._phase2_1_logged: bool = False
 
 	def update(self, sample: Dict[str, Any]) -> List[Dict[str, Any]]:
 		"""
@@ -56,19 +59,32 @@ class JumpDetectorRealtime:
 
 			# Emit a one‑time log line once we have at least ~1 second of data
 			if not self._phase1_logged and len(self._buffer) >= int(self.sample_rate_hz):
-				az_vals = [abs(s["az"]) for s in self._buffer]
-				az_no_g_vals = [abs(s["az"] - 9.8) for s in self._buffer]
-				gz_vals = [abs(s["gz"]) for s in self._buffer]
-
-				duration_s = (self._buffer[-1]["t"] - self._buffer[0]["t"]) if len(self._buffer) > 1 else 0.0
+				stats = preprocess_vertical_series(list(self._buffer))
 				msg = (
-					f"[Phase1] Vertical tracking active over ~{duration_s:.2f} s: "
-					f"max|az|={max(az_vals):.2f} m/s², "
-					f"max|az-g|={max(az_no_g_vals):.2f} m/s², "
-					f"max|gz|={max(gz_vals):.1f} °/s"
+					f"[Phase1] Vertical tracking active over ~{stats['duration']:.2f} s: "
+					f"max|az|={stats['max_abs_az']:.2f} m/s², "
+					f"max|az-g|={stats['max_abs_az_no_g']:.2f} m/s², "
+					f"max|gz|={stats['max_abs_gz']:.1f} °/s"
 				)
 				self.logger(msg)
 				self._phase1_logged = True
+
+			# Phase 2.1: once the window is reasonably full, log a brief
+			# preprocessing confirmation using the same helper. This is kept
+			# to a single message per connection to avoid log spam.
+			if (
+				not self._phase2_1_logged
+				and len(self._buffer) >= int(self.sample_rate_hz * self.window_seconds * 0.9)
+			):
+				stats = preprocess_vertical_series(list(self._buffer))
+				msg = (
+					f"[Phase2.1] Preprocess buffer: {stats['count']} samples over "
+					f"~{stats['duration']:.2f} s, "
+					f"max|az-g|={stats['max_abs_az_no_g']:.2f} m/s², "
+					f"max|gz|={stats['max_abs_gz']:.1f} °/s"
+				)
+				self.logger(msg)
+				self._phase2_1_logged = True
 		except Exception:
 			# Never let Phase 1 diagnostics break the main streaming path.
 			return []

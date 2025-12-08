@@ -117,13 +117,13 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
 
 **Planned steps (mirroring Bruening et al.)**
 
-1. **Signal preprocessing (new `modules/web_jump_detection.py`)**
+1. **Signal preprocessing (Step 2.1 – IN PROGRESS, new `modules/web_jump_detection.py`)**
    - Work primarily in the **vertical direction**:
      - \(a_z\) = vertical acceleration from the sensor’s Z‑axis (approx. aligned to body vertical).
      - \(a_z - g\) = gravity‑removed vertical acceleration.
      - \(\omega_z\) = gyro about the vertical axis.
    - Optionally compute resultant magnitudes, but base jump detection on the **vertical components** to avoid radial‑acceleration issues noted in the paper.
-   - Apply smoothing filters (e.g. Savitzky–Golay / Butterworth) tuned to jump time‑scales (~3–10 Hz) so take‑off and landing peaks are clear.
+   - Apply smoothing filters (e.g. Savitzky–Golay / Butterworth) tuned to jump time‑scales (~3–10 Hz) so take‑off and landing peaks are clear. (Filtering will be added after 2.1; the current implementation focuses on clean vertical series and summary stats.)
 
 2. **Jump‑candidate identification from vertical acceleration**
    - On filtered \(a_z\) or \(a_z - g\), use `scipy.signal.find_peaks` to find **take‑off and landing peaks**:
