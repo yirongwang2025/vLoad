@@ -1,9 +1,11 @@
 """
-Phase 2.1 – basic preprocessing of vertical acceleration / gyro.
+Phase 2.x – utilities for vertical acceleration / gyro processing.
 
-This module provides lightweight utilities to convert the rolling buffer
-maintained by `JumpDetectorRealtime` into simple arrays and summary
-statistics. It does NOT perform peak finding or jump detection yet.
+This module currently provides:
+  - Phase 2.1: basic preprocessing of vertical series.
+  - Phase 2.2: simple peak finding on the gravity‑removed vertical signal.
+  - Phase 2.3: utilities for pairing peaks into candidate jump windows and
+    computing simple flight‑time information.
 """
 
 from typing import Dict, Any, List
@@ -73,5 +75,112 @@ def preprocess_vertical_series(buffer: List[Dict[str, float]]) -> Dict[str, Any]
 		"max_abs_az_no_g": max_abs_az_no_g,
 		"max_abs_gz": max_abs_gz,
 	}
+
+
+def find_vertical_peaks(
+	preprocessed: Dict[str, Any],
+	min_height: float,
+	min_distance_samples: int,
+) -> List[int]:
+	"""
+	Phase 2.2 – basic peak finder for the gravity‑removed vertical
+	acceleration magnitude (|az_no_g|).
+
+	We avoid bringing in external dependencies (e.g. SciPy) by using a
+	simple local‑maxima search with:
+	  - |az_no_g[i]| >= min_height
+	  - At least `min_distance_samples` between accepted peaks.
+
+	Returns a list of indices into the `preprocessed["az_no_g"]` / `["t"]`
+	series where peaks were detected.
+	"""
+	series = preprocessed.get("az_no_g") or []
+	n = len(series)
+	if n < 3 or min_distance_samples <= 0:
+		return []
+
+	peaks: List[int] = []
+	last_idx = -min_distance_samples - 1
+
+	for i in range(1, n - 1):
+		val = abs(float(series[i]))
+		if val < min_height:
+			continue
+
+		# Local maximum in terms of absolute value.
+		if val < abs(float(series[i - 1])) or val < abs(float(series[i + 1])):
+			continue
+
+		if i - last_idx < min_distance_samples:
+			continue
+
+		peaks.append(i)
+		last_idx = i
+
+	return peaks
+
+
+def build_jump_windows(
+	preprocessed: Dict[str, Any],
+	peak_indices: List[int],
+	min_flight_time_s: float,
+	max_flight_time_s: float,
+) -> List[Dict[str, float]]:
+	"""
+	Phase 2.3 – build simple candidate jump windows from vertical peaks.
+
+	We treat earlier peaks as potential take‑off events and later peaks as
+	potential landing events. For each ordered pair (i, j) with j > i, we
+	accept a window if the time difference lies within
+	[min_flight_time_s, max_flight_time_s].
+
+	Returns a list of dicts with:
+	    {
+	        "i_takeoff": int,
+	        "i_landing": int,
+	        "t_takeoff": float,
+	        "t_landing": float,
+	        "flight_time": float,
+	    }
+	No scoring or de‑duplication is done here; the realtime wrapper will
+	handle higher‑level logic and debouncing in later steps.
+	"""
+	t_series = preprocessed.get("t") or []
+	n_t = len(t_series)
+	if n_t == 0 or len(peak_indices) < 2:
+		return []
+
+	min_T = max(0.0, float(min_flight_time_s))
+	max_T = max(min_T, float(max_flight_time_s))
+
+	windows: List[Dict[str, float]] = []
+
+	for idx_i in range(len(peak_indices)):
+		i = peak_indices[idx_i]
+		if i < 0 or i >= n_t:
+			continue
+		t_i = float(t_series[i])
+
+		for idx_j in range(idx_i + 1, len(peak_indices)):
+			j = peak_indices[idx_j]
+			if j < 0 or j >= n_t:
+				continue
+			t_j = float(t_series[j])
+
+			T_f = t_j - t_i
+			if T_f < min_T or T_f > max_T:
+				continue
+
+			windows.append(
+				{
+					"i_takeoff": float(i),
+					"i_landing": float(j),
+					"t_takeoff": t_i,
+					"t_landing": t_j,
+					"flight_time": T_f,
+				}
+			)
+
+	return windows
 
 

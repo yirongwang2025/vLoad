@@ -117,24 +117,46 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
 
 **Planned steps (mirroring Bruening et al.)**
 
-1. **Signal preprocessing (Step 2.1 – IN PROGRESS, new `modules/web_jump_detection.py`)**
+1. **Signal preprocessing (Step 2.1 – COMPLETED, `modules/web_jump_detection.py`)**
    - Work primarily in the **vertical direction**:
      - \(a_z\) = vertical acceleration from the sensor’s Z‑axis (approx. aligned to body vertical).
      - \(a_z - g\) = gravity‑removed vertical acceleration.
      - \(\omega_z\) = gyro about the vertical axis.
-   - Optionally compute resultant magnitudes, but base jump detection on the **vertical components** to avoid radial‑acceleration issues noted in the paper.
-   - Apply smoothing filters (e.g. Savitzky–Golay / Butterworth) tuned to jump time‑scales (~3–10 Hz) so take‑off and landing peaks are clear. (Filtering will be added after 2.1; the current implementation focuses on clean vertical series and summary stats.)
+   - Currently implemented:
+     - `preprocess_vertical_series(buffer)` takes the rolling buffer from `JumpDetectorRealtime` and produces:
+       - Series: `t`, `az`, `az_no_g`, `gz`.
+       - Summary stats: `count`, `duration`, `max_abs_az`, `max_abs_az_no_g`, `max_abs_gz`.
+     - Phase 1 and Phase 2.1 log lines in `JumpDetectorRealtime` confirm sensible ranges once per connection.
+   - Future addition in this step family:
+     - Apply smoothing filters (e.g. Savitzky–Golay / Butterworth) tuned to jump time‑scales (~3–10 Hz) so take‑off and landing peaks are clear.
 
-2. **Jump‑candidate identification from vertical acceleration**
-   - On filtered \(a_z\) or \(a_z - g\), use `scipy.signal.find_peaks` to find **take‑off and landing peaks**:
-     - Apply amplitude thresholds (minimum peak height) and minimum peak separation to eliminate noise and small footwork impacts.
-   - Form jump candidates as **peak pairs**:
-     - A “take‑off” peak followed by a “landing” peak within a plausible **flight‑time window** (e.g. 0.25–0.8 s, adjustable).
-   - Explicitly separate:
-     - **Training/tuning phase** on isolated jumps (to pick thresholds and timing constraints).
-     - **Testing phase** on full programs (to measure missed jumps and false positives), just as in the paper.
+2. **Vertical peak counting diagnostics (Step 2.2 – COMPLETED, `modules/web_jump_detection.py` + `modules/jump_detector.py`)**
+   - Implemented a simple, SciPy‑free peak finder:
+     - `find_vertical_peaks(preprocessed, min_height, min_distance_samples)` works on \(|a_z - g|\) and enforces:
+       - Minimum peak height (`min_height`, in m/s²).
+       - Minimum spacing (`min_distance_samples`, derived from `min_peak_distance_s` and sample rate).
+   - `JumpDetectorRealtime`:
+     - Maintains parameters:
+       - `min_peak_height_m_s2` (default 3.0 m/s²).
+       - `min_peak_distance_s` (default 0.18 s).
+     - About once per second, logs a diagnostic line such as:
+       - `"[Phase2.2] Peaks in ~T s window: K (min_height=..., min_spacing=...)"`,
+       confirming that clear jumps produce more peaks than quiet skating/standing.
 
-3. **Flight time and jump height, from projectile motion**
+3. **Jump‑candidate identification from vertical acceleration (Step 2.3 – IN PROGRESS)**
+   - Use the vertical peaks found in Step 2.2 to form **peak pairs**:
+     - Treat earlier peaks as candidate “take‑off” events and later peaks as candidate “landing” events.
+     - Accept a pair if the time between peaks lies within a plausible **flight‑time window** (e.g. 0.25–0.8 s, tunable).
+   - Implementation plan:
+     - Add utilities in `modules/web_jump_detection.py` to form candidate windows:
+       - Each window will contain `(i_takeoff, i_landing, t_takeoff, t_landing, T_f)`.
+     - Extend `JumpDetectorRealtime` to:
+       - Periodically log a `[Phase2.3]` summary such as:
+         - `"[Phase2.3] Candidate windows in ~T s: M (flight times: ...)"`,
+         confirming that clear jump sequences produce a small number of clean candidate windows with realistic flight times.
+   - Later in Phase 2, these candidate windows will be refined and scored before being promoted to final jump events.
+
+4. **Flight time and jump height, from projectile motion**
    - For each accepted jump candidate:
      - Flight time \(T_f\) = time between the two vertical‑acc peaks.
      - Jump height via the same physics used in the paper, e.g.
@@ -144,21 +166,21 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
        (or a closely related peak‑to‑peak scaling), assuming roughly symmetric take‑off/landing.
    - Store and report **both** flight time and derived height, emphasizing that **relative changes** across jumps/sessions are more reliable than absolute height.
 
-4. **Rotation speed and timing within the jump**
+5. **Rotation speed and timing within the jump**
    - Within the jump flight window (between the vertical‑acc peaks):
      - Compute \( \omega_z(t) \) from gyro; find **peak rotation speed** = max \(|\omega_z|\).
      - Record the **phase** of this peak within flight:
        - `rotation_phase = (t_peak − t_takeoff) / T_f` (expected to be near ~0.6–0.7 in many jumps, as reported in the paper).
    - Use these metrics for both performance feedback (rotation quality) and as an extra check that the event is a genuine multi‑revolution jump.
 
-5. **False‑positive control (competition‑routine robustness)**
+6. **False‑positive control (competition‑routine robustness)**
    - Reject candidate jumps that violate Bruening‑style constraints, e.g.:
      - Flight time outside plausible bounds.
      - Peak \(|\omega_z|\) below a minimum rotation‑speed threshold for multi‑revolution jumps.
      - Vertical‑acc peaks too small, or with too many additional large peaks between them (typical of footwork/spins).
    - Expose thresholds as parameters to allow **skater‑specific tuning** in future, as suggested in the paper.
 
-6. **Real‑time integration**
+7. **Real‑time integration**
    - Extend `JumpDetectorRealtime` to:
      - Maintain a rolling multi‑second buffer of IMU samples.
      - Periodically call `web_jump_detection.detect_jumps_from_imu_data(buffer, params)`.
