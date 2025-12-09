@@ -8,6 +8,8 @@ This module currently provides:
     computing simple flight‑time information.
   - Phase 2.4: utilities for deriving basic height / rotation metrics for
     each candidate window.
+  - Phase 2.5: utilities (added below) for filtering and scoring jump
+    candidates into higher‑confidence jump events.
 """
 
 from typing import Dict, Any, List
@@ -253,5 +255,83 @@ def compute_window_metrics(
 		out.append(enriched)
 
 	return out
+
+
+def select_jump_events(
+	windows_with_metrics: List[Dict[str, float]],
+	min_height_m: float,
+	min_peak_az_no_g: float,
+	min_peak_gz_deg_s: float,
+	min_separation_s: float,
+) -> List[Dict[str, float]]:
+	"""
+	Phase 2.5 – filter and score enriched windows into jump events.
+
+	Filtering:
+	  - Require minimum height, vertical impulse (peak_az_no_g) and
+	    rotation speed (peak_gz).
+	  - Enforce a minimum separation in time between emitted jumps.
+
+	Scoring (very simple heuristic confidence in [0, 1]):
+	  - Normalize height, peak_az_no_g and peak_gz against nominal
+	    "good jump" scales and take a weighted average.
+	"""
+	if not windows_with_metrics:
+		return []
+
+	# Filter by hard thresholds.
+	candidates: List[Dict[str, float]] = []
+	for w in windows_with_metrics:
+		h = float(w.get("height", 0.0))
+		a = float(w.get("peak_az_no_g", 0.0))
+		g = float(w.get("peak_gz", 0.0))
+		if h < min_height_m or a < min_peak_az_no_g or g < min_peak_gz_deg_s:
+			continue
+		candidates.append(w)
+
+	if not candidates:
+		return []
+
+	# Sort by takeoff time.
+	candidates.sort(key=lambda x: float(x.get("t_takeoff", 0.0)))
+
+	selected: List[Dict[str, float]] = []
+	last_t_peak: float = -1e9
+	min_sep = max(0.0, float(min_separation_s))
+
+	for w in candidates:
+		T_f = float(w.get("flight_time", 0.0))
+		h = float(w.get("height", 0.0))
+		a = float(w.get("peak_az_no_g", 0.0))
+		g = float(w.get("peak_gz", 0.0))
+		t_peak = float(w.get("t_peak_gz", w.get("t_takeoff", 0.0)))
+
+		if t_peak - last_t_peak < min_sep:
+			continue
+
+		# Compute a simple confidence score based on rough nominal scales.
+		def _clip01(x: float) -> float:
+			return max(0.0, min(1.0, x))
+
+		norm_h = _clip01(h / 0.6)  # ~0.6 m as a "strong" multi‑rev jump
+		norm_a = _clip01(a / 6.0)  # ~6 m/s² vertical impulse above g
+		norm_g = _clip01(g / 800.0)  # ~800°/s as nominal strong rotation
+
+		conf = 0.4 * norm_h + 0.3 * norm_a + 0.3 * norm_g
+
+		event = dict(w)
+		event["confidence"] = float(conf)
+		event["t_peak"] = t_peak
+
+		# Also expose a crude rotation phase within the flight window.
+		T_f_safe = T_f if T_f > 1e-6 else 1.0
+		event["rotation_phase"] = float(
+			(t_peak - float(w.get("t_takeoff", 0.0))) / T_f_safe
+		)
+
+		selected.append(event)
+		last_t_peak = t_peak
+
+	return selected
 
 

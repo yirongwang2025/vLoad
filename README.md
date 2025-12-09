@@ -157,7 +157,7 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
          confirming that clear jump sequences produce a small number of candidate windows with realistic flight times while quiet motion produces few or none.
    - Later steps use these windows as the basis for computing jump height and rotation metrics and, eventually, final detected jumps.
 
-4. **Flight time and jump height, from projectile motion (Step 2.4 – IN PROGRESS)**
+4. **Flight time and jump height, from projectile motion (Step 2.4 – COMPLETED)**
    - For each accepted jump candidate:
      - Flight time \(T_f\) = time between the two vertical‑acc peaks.
      - Jump height via the same physics used in the paper, e.g.
@@ -166,28 +166,46 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
        \]
        (or a closely related peak‑to‑peak scaling), assuming roughly symmetric take‑off/landing.
    - Store and report **both** flight time and derived height, emphasizing that **relative changes** across jumps/sessions are more reliable than absolute height.
+   - Implemented in:
+     - `modules/web_jump_detection.py`:
+       - `compute_window_metrics(preprocessed, windows)` enriches each candidate with:
+         - `height`, `peak_az_no_g` (max |a_z-g|), `peak_gz` (max |ω_z|), and `t_peak_gz`.
+     - `modules/jump_detector.py`:
+       - Phase 2.4 log line summarizing the first few candidates, e.g.:
+         - `"[Phase2.4] Jump metrics: T_f=..., h=..., ωz=...°/s | ..."` for quick sanity‑checking of magnitude and timing.
 
-5. **Rotation speed and timing within the jump**
+5. **Rotation speed and timing within the jump (Step 2.4 – COMPLETED within metrics above)**
    - Within the jump flight window (between the vertical‑acc peaks):
      - Compute \( \omega_z(t) \) from gyro; find **peak rotation speed** = max \(|\omega_z|\).
      - Record the **phase** of this peak within flight:
        - `rotation_phase = (t_peak − t_takeoff) / T_f` (expected to be near ~0.6–0.7 in many jumps, as reported in the paper).
    - Use these metrics for both performance feedback (rotation quality) and as an extra check that the event is a genuine multi‑revolution jump.
 
-6. **False‑positive control (competition‑routine robustness)**
-   - Reject candidate jumps that violate Bruening‑style constraints, e.g.:
-     - Flight time outside plausible bounds.
-     - Peak \(|\omega_z|\) below a minimum rotation‑speed threshold for multi‑revolution jumps.
-     - Vertical‑acc peaks too small, or with too many additional large peaks between them (typical of footwork/spins).
-   - Expose thresholds as parameters to allow **skater‑specific tuning** in future, as suggested in the paper.
+6. **False‑positive control and confidence scoring (Step 2.5 – IN PROGRESS)**
+   - Goals:
+     - Reject candidate windows that are too small (height/impulse/rotation) or too close together in time.
+     - Assign a simple confidence score based on height, vertical impulse, and rotation speed.
+   - Implementation plan:
+     - `modules/web_jump_detection.py`:
+       - `select_jump_events(windows_with_metrics, ...)`:
+         - Filters on:
+           - Minimum height.
+           - Minimum `peak_az_no_g`.
+           - Minimum `peak_gz` (rotation speed).
+         - Enforces a minimum separation between emitted jumps.
+         - Computes a heuristic confidence in \([0, 1]\) from normalized height, vertical impulse, and rotation.
+     - `modules/jump_detector.py`:
+       - Extend `JumpDetectorRealtime.update(...)` to:
+         - Call `select_jump_events(...)` on the metrics from Step 2.4.
+         - Keep track of the last emitted jump time to avoid duplicates across overlapping buffers.
+         - Log concise `[Jump]` lines with:
+           - Peak time, flight time, height, peak rotation speed, rotation phase, and confidence.
+         - Return a list of new jump events so the server/UI can consume them later.
 
 7. **Real‑time integration**
-   - Extend `JumpDetectorRealtime` to:
-     - Maintain a rolling multi‑second buffer of IMU samples.
-     - Periodically call `web_jump_detection.detect_jumps_from_imu_data(buffer, params)`.
-     - Debounce events so each physical jump is emitted once, with:
-       - Time, flight time, estimated height, peak rotation speed, rotation phase, and a confidence score based on all the above.
-   - Log concise jump summaries to the web UI log window and, later, expose them via dedicated WebSocket messages for richer UI components.
+   - Once Steps 2.1–2.5 are validated, wire jump events into the FastAPI/WebSocket path:
+     - Forward jump events from `JumpDetectorRealtime` to the browser as dedicated messages.
+     - Add a simple jump list or counter in the UI, using the existing log as the primary debug channel.
 
 **Output format (tentative)**
 - Each detected jump will be a small dict, e.g.:

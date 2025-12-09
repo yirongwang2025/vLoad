@@ -7,6 +7,7 @@ from .web_jump_detection import (
 	find_vertical_peaks,
 	build_jump_windows,
 	compute_window_metrics,
+	select_jump_events,
 )
 
 
@@ -32,6 +33,7 @@ class JumpDetectorRealtime:
 		sample_rate_hz: float = 104.0,
 		window_seconds: float = 3.0,
 		logger: Optional[Callable[[str], None]] = None,
+		config: Optional[Dict[str, float]] = None,
 	) -> None:
 		self.sample_rate_hz = float(sample_rate_hz) if sample_rate_hz > 0 else 104.0
 		self.window_seconds = float(window_seconds) if window_seconds > 0 else 3.0
@@ -57,6 +59,22 @@ class JumpDetectorRealtime:
 		# Plausible flight-time window (seconds).
 		self.min_flight_time_s: float = 0.25
 		self.max_flight_time_s: float = 0.80
+
+		# Phase 2.5 parameters: promote candidates to actual jump events.
+		self.min_jump_height_m: float = 0.15
+		self.min_jump_peak_az_no_g: float = 3.5
+		self.min_jump_peak_gz_deg_s: float = 180.0
+		self.min_new_event_separation_s: float = 0.5
+		self._last_emitted_peak_t: float = 0.0
+
+		# Optional overrides from config dict.
+		if config:
+			for key, value in config.items():
+				if hasattr(self, key):
+					try:
+						setattr(self, key, float(value))
+					except (TypeError, ValueError):
+						continue
 
 	def update(self, sample: Dict[str, Any]) -> List[Dict[str, Any]]:
 		"""
@@ -163,9 +181,11 @@ class JumpDetectorRealtime:
 				self.logger(msg)
 				self._last_phase2_3_log_t = now_wall
 
-			# Phase 2.4: every few seconds, derive simple jump metrics
+			# Phase 2.4 & 2.5: every few seconds, derive simple jump metrics
 			# (height and peak rotation speed) for the current candidate
-			# windows and log a compact summary. Still diagnostics only.
+			# windows, log a compact summary, and then filter/score into
+			# higher-confidence jump events.
+			new_events: List[Dict[str, Any]] = []
 			if self._phase2_1_logged and now_wall - self._last_phase2_4_log_t >= 3.0:
 				stats = preprocess_vertical_series(list(self._buffer))
 				min_dist_samples = max(
@@ -199,11 +219,42 @@ class JumpDetectorRealtime:
 					msg = "[Phase2.4] Jump metrics: none in current window"
 				self.logger(msg)
 				self._last_phase2_4_log_t = now_wall
+
+				# Phase 2.5 – select higher-confidence jump events.
+				candidates = select_jump_events(
+					metrics,
+					min_height_m=self.min_jump_height_m,
+					min_peak_az_no_g=self.min_jump_peak_az_no_g,
+					min_peak_gz_deg_s=self.min_jump_peak_gz_deg_s,
+					min_separation_s=self.min_new_event_separation_s,
+				)
+				for ev in candidates:
+					t_peak = float(ev.get("t_peak", 0.0))
+					if (
+						t_peak - self._last_emitted_peak_t
+						>= self.min_new_event_separation_s
+					):
+						new_events.append(ev)
+						self._last_emitted_peak_t = t_peak
+
+				for ev in new_events:
+					self.logger(
+						"[Jump] t_peak={:.3f}, T_f={:.3f}s, h={:.3f}m, "
+						"ωz_peak={:.0f}°/s, phase={:.2f}, conf={:.2f}".format(
+							ev.get("t_peak", 0.0),
+							ev.get("flight_time", 0.0),
+							ev.get("height", 0.0),
+							ev.get("peak_gz", 0.0),
+							ev.get("rotation_phase", 0.0),
+							ev.get("confidence", 0.0),
+						)
+					)
+
 		except Exception:
 			# Never let Phase 1 diagnostics break the main streaming path.
 			return []
 
-		# Phase 1: no jump events yet.
-		return []
+		# Phase 2.5: return any new jump events detected in this call.
+		return new_events
 
 

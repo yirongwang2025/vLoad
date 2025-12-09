@@ -21,6 +21,15 @@ RATE = int(os.getenv("MOVE_RATE", "104"))
 _ble_task: Optional[asyncio.Task] = None
 _ble_client: Optional[MovesenseGATTClient] = None
 
+# Jump detection config (Phase 2.5): tweakable via /config endpoint.
+JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
+	"min_jump_height_m": 0.15,
+	"min_jump_peak_az_no_g": 3.5,
+	"min_jump_peak_gz_deg_s": 180.0,
+	"min_new_event_separation_s": 0.5,
+}
+_jump_config: Dict[str, float] = dict(JUMP_CONFIG_DEFAULTS)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -94,6 +103,26 @@ INDEX_HTML = """
     <canvas id="plotMag" width="600" height="140" style="display:block; margin-top:4px; border:1px solid #ddd;"></canvas>
   </div>
 
+  <div style="margin-top: 10px; padding: 8px; border: 1px solid #ddd;">
+    <strong>Jump detection settings</strong>
+    <div style="font-size: 12px; margin-top: 4px;">
+      <label>Min height (m):
+        <input id="minHeightInput" type="number" step="0.01" style="width:60px;">
+      </label>
+      <label style="margin-left: 8px;">Min |az-g| (m/s²):
+        <input id="minAzInput" type="number" step="0.1" style="width:60px;">
+      </label>
+      <label style="margin-left: 8px;">Min ωz (°/s):
+        <input id="minGzInput" type="number" step="10" style="width:70px;">
+      </label>
+      <label style="margin-left: 8px;">Min separation (s):
+        <input id="minSepInput" type="number" step="0.1" style="width:60px;">
+      </label>
+      <button id="saveConfigBtn" style="margin-left: 8px;">Save</button>
+      <span id="configStatus" style="margin-left: 6px; color:#555;"></span>
+    </div>
+  </div>
+
   <div style="margin-top: 10px;">
     <strong>Log</strong>
     <pre id="logBox" style="height: 160px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #fafafa; font-size: 11px;"></pre>
@@ -111,6 +140,12 @@ INDEX_HTML = """
     const ctxAcc = canvasAcc.getContext('2d');
     const ctxGyro = canvasGyro.getContext('2d');
     const ctxMag = canvasMag.getContext('2d');
+    const minHeightInput = document.getElementById('minHeightInput');
+    const minAzInput = document.getElementById('minAzInput');
+    const minGzInput = document.getElementById('minGzInput');
+    const minSepInput = document.getElementById('minSepInput');
+    const saveConfigBtn = document.getElementById('saveConfigBtn');
+    const configStatus = document.getElementById('configStatus');
 
     const maxPts = 150;  // number of points kept in history
     // Acceleration series
@@ -139,6 +174,34 @@ INDEX_HTML = """
       }
     } catch (e) {
       console.error('localStorage error', e);
+    }
+
+    // Fetch initial jump config
+    async function loadConfig() {
+      try {
+        const resp = await fetch('/config');
+        if (!resp.ok) {
+          addLog(`Config load failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        const jc = data.jump || {};
+        if (typeof jc.min_jump_height_m === 'number') {
+          minHeightInput.value = jc.min_jump_height_m.toFixed(2);
+        }
+        if (typeof jc.min_jump_peak_az_no_g === 'number') {
+          minAzInput.value = jc.min_jump_peak_az_no_g.toFixed(1);
+        }
+        if (typeof jc.min_jump_peak_gz_deg_s === 'number') {
+          minGzInput.value = jc.min_jump_peak_gz_deg_s.toFixed(0);
+        }
+        if (typeof jc.min_new_event_separation_s === 'number') {
+          minSepInput.value = jc.min_new_event_separation_s.toFixed(1);
+        }
+      } catch (e) {
+        console.error(e);
+        addLog(`Config load error: ${e}`);
+      }
     }
 
     function pushLimited(arr, value) {
@@ -247,7 +310,7 @@ INDEX_HTML = """
     }
     requestAnimationFrame(draw);
 
-    ws.onopen = () => { addLog('WebSocket connected'); };
+    ws.onopen = () => { addLog('WebSocket connected'); loadConfig(); };
     ws.onclose = () => { addLog('WebSocket disconnected'); };
     ws.onerror = () => { addLog('WebSocket error'); };
 
@@ -361,6 +424,36 @@ INDEX_HTML = """
       } catch (e) {
         console.error(e);
         addLog(`Disconnect error: ${e}`);
+      }
+    };
+
+    // Save jump config
+    saveConfigBtn.onclick = async () => {
+      const payload = {
+        min_jump_height_m: parseFloat(minHeightInput.value),
+        min_jump_peak_az_no_g: parseFloat(minAzInput.value),
+        min_jump_peak_gz_deg_s: parseFloat(minGzInput.value),
+        min_new_event_separation_s: parseFloat(minSepInput.value),
+      };
+      configStatus.textContent = 'Saving...';
+      try {
+        const resp = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jump: payload })
+        });
+        if (!resp.ok) {
+          configStatus.textContent = `Save failed (${resp.status})`;
+          addLog(`Config save failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        configStatus.textContent = data.detail || 'Saved (reconnect to apply)';
+        addLog(data.detail || 'Jump config updated (reconnect to apply)');
+      } catch (e) {
+        console.error(e);
+        configStatus.textContent = 'Save error';
+        addLog(`Config save error: ${e}`);
       }
     };
   </script>
@@ -514,6 +607,37 @@ async def disconnect_device():
 	_log_to_clients("BLE worker stopped and client disconnected via /disconnect")
 	return {"detail": "Disconnected BLE worker and client"}
 
+
+@app.get("/config")
+async def get_config():
+	"""
+	Return current jump detection configuration.
+	"""
+	return {"jump": _jump_config}
+
+
+@app.post("/config")
+async def set_config(payload: Dict[str, Any]):
+	"""
+	Update jump detection configuration. Changes take effect on the next
+	connection (when a new JumpDetectorRealtime is created).
+	"""
+	global _jump_config
+
+	body = payload or {}
+	jump_cfg = body.get("jump") or {}
+	if not isinstance(jump_cfg, dict):
+		raise HTTPException(status_code=400, detail="Field 'jump' must be an object")
+
+	for key, value in jump_cfg.items():
+		if key in JUMP_CONFIG_DEFAULTS:
+			try:
+				_jump_config[key] = float(value)
+			except (TypeError, ValueError):
+				continue
+
+	return {"detail": "Jump config updated. Reconnect sensor to apply."}
+
 def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 	# Simple derived metrics for demo
 	ax, ay, az = sample["acc"]
@@ -534,11 +658,12 @@ async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 	client = MovesenseGATTClient()
 	_ble_client = client
 
-	# Phase 1: simple vertical tracking / diagnostics
+	# Phase 1/2: jump detector with current config snapshot
 	jump_detector = JumpDetectorRealtime(
 		sample_rate_hz=rate,
 		window_seconds=3.0,
 		logger=lambda msg: _log_to_clients(f"[JumpDetector] {msg}"),
+		config=_jump_config,
 	)
 
 	try:
