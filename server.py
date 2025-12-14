@@ -124,6 +124,10 @@ INDEX_HTML = """
 </head>
 <body>
   <h2>Movesense Live IMU</h2>
+  <div style="margin-top: 8px; margin-bottom: 8px;">
+    <span style="padding:4px 8px; border-bottom:2px solid #1976d2; font-weight:bold;">Connect</span>
+    <a href="/jumps" style="margin-left:8px; padding:4px 8px; text-decoration:none; color:#1976d2;">Jump detection</a>
+  </div>
 
   <div style="margin-top: 8px;">
     <label for="deviceInput"><strong>Device MAC / name:</strong></label>
@@ -148,39 +152,6 @@ INDEX_HTML = """
     <canvas id="plotMag" width="600" height="140" style="display:block; margin-top:4px; border:1px solid #ddd;"></canvas>
   </div>
 
-  <div style="margin-top: 10px; padding: 8px; border: 1px solid #ddd;">
-    <strong>Jump detection settings</strong>
-    <div style="font-size: 12px; margin-top: 4px;">
-      <label>Min height (m):
-        <input id="minHeightInput" type="number" step="0.01" style="width:60px;">
-      </label>
-      <label style="margin-left: 8px;">Min |az-g| (m/s²):
-        <input id="minAzInput" type="number" step="0.1" style="width:60px;">
-      </label>
-      <label style="margin-left: 8px;">Min ωz (°/s):
-        <input id="minGzInput" type="number" step="10" style="width:70px;">
-      </label>
-      <label style="margin-left: 8px;">Min separation (s):
-        <input id="minSepInput" type="number" step="0.1" style="width:60px;">
-      </label>
-      <button id="saveConfigBtn" style="margin-left: 8px;">Save</button>
-      <span id="configStatus" style="margin-left: 6px; color:#555;"></span>
-    </div>
-  </div>
-
-  <div style="margin-top: 10px; padding: 8px; border: 1px solid #ddd;">
-    <strong>Jump events</strong>
-    <div style="font-size: 12px; margin-top: 4px;">
-      <button id="startDetectBtn">Start detection</button>
-      <button id="stopDetectBtn" style="margin-left: 6px;">Stop detection</button>
-      <span id="jumpStatus" style="margin-left: 8px; color:#555;"></span>
-    </div>
-    <div style="font-size: 12px; margin-top: 4px;">
-      Total jumps: <span id="jumpCount">0</span>
-    </div>
-    <pre id="jumpList" style="height: 120px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #ffffff; font-size: 11px;"></pre>
-  </div>
-
   <div style="margin-top: 10px;">
     <strong>Log</strong>
     <pre id="logBox" style="height: 160px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #fafafa; font-size: 11px;"></pre>
@@ -198,17 +169,6 @@ INDEX_HTML = """
     const ctxAcc = canvasAcc.getContext('2d');
     const ctxGyro = canvasGyro.getContext('2d');
     const ctxMag = canvasMag.getContext('2d');
-    const minHeightInput = document.getElementById('minHeightInput');
-    const minAzInput = document.getElementById('minAzInput');
-    const minGzInput = document.getElementById('minGzInput');
-    const minSepInput = document.getElementById('minSepInput');
-    const saveConfigBtn = document.getElementById('saveConfigBtn');
-    const configStatus = document.getElementById('configStatus');
-    const startDetectBtn = document.getElementById('startDetectBtn');
-    const stopDetectBtn = document.getElementById('stopDetectBtn');
-    const jumpStatus = document.getElementById('jumpStatus');
-    const jumpCountEl = document.getElementById('jumpCount');
-    const jumpListEl = document.getElementById('jumpList');
 
     const maxPts = 150;  // number of points kept in history
     // Acceleration series
@@ -217,8 +177,6 @@ INDEX_HTML = """
     const gyroX = [], gyroY = [], gyroZ = [];
     // Magnetometer series
     const magX = [], magY = [], magZ = [];
-
-    let jumpCount = 0;
 
     const colors = ['#1976d2', '#d32f2f', '#388e3c']; // x=blue, y=red, z=green
     let sampleRate = null; // Hz, from server messages
@@ -230,29 +188,6 @@ INDEX_HTML = """
       logBox.scrollTop = logBox.scrollHeight;
     }
 
-    function addJump(ev) {
-      jumpCount += 1;
-      jumpCountEl.textContent = String(jumpCount);
-
-      var tPeak = (typeof ev.t_peak === 'number') ? ev.t_peak.toFixed(3) : '';
-      var T_f = (typeof ev.flight_time === 'number') ? ev.flight_time.toFixed(3) : '';
-      var h = (typeof ev.height === 'number') ? ev.height.toFixed(3) : '';
-      var accPeak = (typeof ev.acc_peak === 'number') ? ev.acc_peak.toFixed(2) : '';
-      var gyroPeak = (typeof ev.gyro_peak === 'number') ? ev.gyro_peak.toFixed(0) : '';
-      var phase = (typeof ev.rotation_phase === 'number') ? ev.rotation_phase.toFixed(2) : '';
-      var conf = (typeof ev.confidence === 'number') ? ev.confidence.toFixed(2) : '';
-
-      var line = 't_peak=' + tPeak + 's, T_f=' + T_f + 's, h=' + h + 'm, ' +
-                 'az_no_g=' + accPeak + ', ' +
-                 'gz=' + gyroPeak + ', phase=' + phase + ', conf=' + conf;
-
-      var existing = jumpListEl.textContent ? jumpListEl.textContent.split('\\n') : [];
-      existing.push(line);
-      var maxJumpLines = 50;
-      while (existing.length > maxJumpLines) existing.shift();
-      jumpListEl.textContent = existing.join('\\n');
-    }
-
     // Restore last-used device from localStorage, if any
     try {
       const last = localStorage.getItem('vload_last_device');
@@ -262,34 +197,6 @@ INDEX_HTML = """
       }
     } catch (e) {
       console.error('localStorage error', e);
-    }
-
-    // Fetch initial jump config
-    async function loadConfig() {
-      try {
-        const resp = await fetch('/config');
-        if (!resp.ok) {
-          addLog(`Config load failed with status ${resp.status}`);
-          return;
-        }
-        const data = await resp.json();
-        const jc = data.jump || {};
-        if (typeof jc.min_jump_height_m === 'number') {
-          minHeightInput.value = jc.min_jump_height_m.toFixed(2);
-        }
-        if (typeof jc.min_jump_peak_az_no_g === 'number') {
-          minAzInput.value = jc.min_jump_peak_az_no_g.toFixed(1);
-        }
-        if (typeof jc.min_jump_peak_gz_deg_s === 'number') {
-          minGzInput.value = jc.min_jump_peak_gz_deg_s.toFixed(0);
-        }
-        if (typeof jc.min_new_event_separation_s === 'number') {
-          minSepInput.value = jc.min_new_event_separation_s.toFixed(1);
-        }
-      } catch (e) {
-        console.error(e);
-        addLog(`Config load error: ${e}`);
-      }
     }
 
     function pushLimited(arr, value) {
@@ -398,18 +305,13 @@ INDEX_HTML = """
     }
     requestAnimationFrame(draw);
 
-    ws.onopen = () => { addLog('WebSocket connected'); loadConfig(); };
+    ws.onopen = () => { addLog('WebSocket connected'); };
     ws.onclose = () => { addLog('WebSocket disconnected'); };
     ws.onerror = () => { addLog('WebSocket error'); };
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-
-        if (msg.type === 'jump') {
-          addJump(msg);
-          return;
-        }
 
         // Log-type messages
         if (msg.type === 'log' && typeof msg.msg === 'string') {
@@ -520,36 +422,6 @@ INDEX_HTML = """
       }
     };
 
-    // Save jump config
-    saveConfigBtn.onclick = async () => {
-      const payload = {
-        min_jump_height_m: parseFloat(minHeightInput.value),
-        min_jump_peak_az_no_g: parseFloat(minAzInput.value),
-        min_jump_peak_gz_deg_s: parseFloat(minGzInput.value),
-        min_new_event_separation_s: parseFloat(minSepInput.value),
-      };
-      configStatus.textContent = 'Saving...';
-      try {
-        const resp = await fetch('/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jump: payload })
-        });
-        if (!resp.ok) {
-          configStatus.textContent = `Save failed (${resp.status})`;
-          addLog(`Config save failed with status ${resp.status}`);
-          return;
-        }
-        const data = await resp.json();
-        configStatus.textContent = data.detail || 'Saved (reconnect to apply)';
-        addLog(data.detail || 'Jump config updated (reconnect to apply)');
-      } catch (e) {
-        console.error(e);
-        configStatus.textContent = 'Save error';
-        addLog(`Config save error: ${e}`);
-      }
-    };
-
     // Start detection button – enables jump events once the sensor is stable.
     if (startDetectBtn) {
       startDetectBtn.onclick = async () => {
@@ -598,9 +470,354 @@ INDEX_HTML = """
 </html>
 """
 
+JUMPS_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Movesense Jumps</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    #jumpList { border: 1px solid #ddd; padding: 8px; max-height: 260px; overflow-y: auto; }
+    #jumpList li { font-size: 12px; margin-bottom: 4px; }
+    #logBox { height: 140px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #fafafa; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h2>Movesense Jump Analysis</h2>
+  <div style="margin-top: 8px; margin-bottom: 8px;">
+    <a href="/" style="padding:4px 8px; text-decoration:none; color:#1976d2;">Connect</a>
+    <span style="margin-left:8px; padding:4px 8px; border-bottom:2px solid #1976d2; font-weight:bold;">Jump detection</span>
+  </div>
+
+  <div style="margin-top: 10px; padding: 8px; border: 1px solid #ddd;">
+    <strong>Detection control</strong>
+    <div style="font-size: 12px; margin-top: 4px;">
+      <button id="startDetectBtn">Start detection</button>
+      <button id="stopDetectBtn" style="margin-left: 6px;">Stop detection</button>
+      <span id="jumpStatus" style="margin-left: 8px; color:#555;"></span>
+    </div>
+    <div style="font-size: 12px; margin-top: 4px;">
+      Total jumps: <span id="jumpCount">0</span>
+    </div>
+  </div>
+
+  <div style="margin-top: 10px; padding: 8px; border: 1px solid #ddd;">
+    <strong>Jump detection settings</strong>
+    <div style="font-size: 12px; margin-top: 4px;">
+      <label>Min height (m):
+        <input id="minHeightInput" type="number" step="0.01" style="width:60px;">
+      </label>
+      <label style="margin-left: 8px;">Min |az-g| (m/s²):
+        <input id="minAzInput" type="number" step="0.1" style="width:60px;">
+      </label>
+      <label style="margin-left: 8px;">Min ωz (°/s):
+        <input id="minGzInput" type="number" step="10" style="width:70px;">
+      </label>
+      <label style="margin-left: 8px;">Min separation (s):
+        <input id="minSepInput" type="number" step="0.1" style="width:60px;">
+      </label>
+      <button id="saveConfigBtn" style="margin-left: 8px;">Save</button>
+      <span id="configStatus" style="margin-left: 6px; color:#555;"></span>
+    </div>
+  </div>
+
+  <div style="margin-top: 10px; display: flex; gap: 12px;">
+    <div style="flex: 1; padding: 8px; border: 1px solid #ddd;">
+      <strong>Detected jumps</strong>
+      <ul id="jumpList" style="list-style: none; padding-left: 0; margin-top: 6px;"></ul>
+    </div>
+    <div style="flex: 1; padding: 8px; border: 1px solid #ddd;">
+      <strong>Selected jump details</strong>
+      <div id="jumpDetail" style="font-size: 12px; margin-top: 6px;">
+        <div><em>No jump selected</em></div>
+      </div>
+      <div style="font-size: 12px; margin-top: 8px;">
+        <strong>Annotation</strong>
+        <div style="margin-top: 4px;">
+          <label style="display:block; margin-bottom:4px;">
+            Jump name:
+            <input id="jumpNameInput" type="text" style="width: 100%; box-sizing: border-box;">
+          </label>
+          <textarea id="jumpNote" rows="3" style="width: 100%; box-sizing: border-box;"></textarea>
+        </div>
+        <div style="margin-top: 4px; color:#777; font-size: 11px;">
+          Name and notes are kept in this browser session for now; saving to disk/server will be added later.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: 10px;">
+    <strong>Log</strong>
+    <pre id="logBox"></pre>
+  </div>
+
+  <script>
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    const jumpStatus = document.getElementById('jumpStatus');
+    const jumpCountEl = document.getElementById('jumpCount');
+    const jumpListEl = document.getElementById('jumpList');
+    const startDetectBtn = document.getElementById('startDetectBtn');
+    const stopDetectBtn = document.getElementById('stopDetectBtn');
+    const logBox = document.getElementById('logBox');
+    const minHeightInput = document.getElementById('minHeightInput');
+    const minAzInput = document.getElementById('minAzInput');
+    const minGzInput = document.getElementById('minGzInput');
+    const minSepInput = document.getElementById('minSepInput');
+    const saveConfigBtn = document.getElementById('saveConfigBtn');
+    const configStatus = document.getElementById('configStatus');
+    const jumpNameInput = document.getElementById('jumpNameInput');
+    const jumpNote = document.getElementById('jumpNote');
+
+    let jumpCount = 0;
+    const maxJumpItems = 100;
+    const jumps = [];  // array of { ev, name, li }
+    let selectedIndex = -1;
+
+    function addLog(line) {
+      const ts = new Date().toISOString();
+      logBox.textContent += '[' + ts + '] ' + line + '\\n';
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function fmt(num, digits) {
+      if (typeof num !== 'number' || !isFinite(num)) return '';
+      return num.toFixed(digits);
+    }
+
+    function formatTimeFromEpoch(tPeakSec) {
+      if (typeof tPeakSec !== 'number' || !isFinite(tPeakSec)) return '';
+      const d = new Date(tPeakSec * 1000);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      const ms = String(d.getMilliseconds()).padStart(3, '0');
+      return hh + ':' + mm + ':' + ss + '.' + ms;
+    }
+
+    function renderSelected() {
+      const detail = document.getElementById('jumpDetail');
+      if (!detail) return;
+      if (selectedIndex < 0 || selectedIndex >= jumps.length) {
+        detail.innerHTML = '<div><em>No jump selected</em></div>';
+        if (jumpNameInput) jumpNameInput.value = '';
+        if (jumpNote) jumpNote.value = '';
+        return;
+      }
+      const meta = jumps[selectedIndex];
+      const ev = meta.ev;
+
+      const tPeak = fmt(ev.t_peak, 3);
+      const T_f = fmt(ev.flight_time, 3);
+      const h = fmt(ev.height, 3);
+      const accPeak = fmt(ev.acc_peak, 2);
+      const gyroPeak = fmt(ev.gyro_peak, 0);
+      const phase = fmt(ev.rotation_phase, 2);
+      const conf = fmt(ev.confidence, 2);
+
+      detail.innerHTML =
+        '<div>t_peak: ' + tPeak + ' s</div>' +
+        '<div>Flight time: ' + T_f + ' s</div>' +
+        '<div>Height: ' + h + ' m</div>' +
+        '<div>az_no_g (peak): ' + accPeak + '</div>' +
+        '<div>gz (peak): ' + gyroPeak + ' °/s</div>' +
+        '<div>Rotation phase: ' + phase + '</div>' +
+        '<div>Confidence: ' + conf + '</div>';
+      if (jumpNameInput) {
+        jumpNameInput.value = meta.name || '';
+      }
+    }
+
+    function updateSelectionHighlight() {
+      const children = jumpListEl.children;
+      for (let i = 0; i < children.length; i++) {
+        const li = children[i];
+        if (i === selectedIndex) {
+          li.style.backgroundColor = '#e3f2fd';
+        } else {
+          li.style.backgroundColor = '';
+        }
+      }
+    }
+
+    function addJump(ev) {
+      jumpCount += 1;
+      jumpCountEl.textContent = String(jumpCount);
+
+      const index = jumps.length;
+      const defaultName = 'Jump ' + String(index + 1);
+      const timeLabel = formatTimeFromEpoch(ev.t_peak);
+
+      const meta = { ev: ev, name: defaultName, li: null };
+      jumps.push(meta);
+
+      const li = document.createElement('li');
+      li.textContent = defaultName + (timeLabel ? (' (' + timeLabel + ')') : '');
+      li.style.cursor = 'pointer';
+      li.onclick = function () {
+        selectedIndex = index;
+        updateSelectionHighlight();
+        renderSelected();
+      };
+      jumpListEl.appendChild(li);
+      meta.li = li;
+
+      while (jumpListEl.children.length > maxJumpItems) {
+        jumpListEl.removeChild(jumpListEl.firstChild);
+      }
+    }
+
+    if (jumpNameInput) {
+      jumpNameInput.oninput = function () {
+        if (selectedIndex < 0 || selectedIndex >= jumps.length) return;
+        const meta = jumps[selectedIndex];
+        const raw = jumpNameInput.value || '';
+        const baseName = raw.trim() || ('Jump ' + String(selectedIndex + 1));
+        meta.name = baseName;
+        const timeLabel = formatTimeFromEpoch(meta.ev.t_peak);
+        if (meta.li) {
+          meta.li.textContent = baseName + (timeLabel ? (' (' + timeLabel + ')') : '');
+        }
+      };
+    }
+
+    ws.onopen = function () { addLog('WebSocket connected'); };
+    ws.onclose = function () { addLog('WebSocket disconnected'); };
+    ws.onerror = function () { addLog('WebSocket error'); };
+
+    ws.onmessage = function (ev) {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'jump') {
+          addJump(msg);
+          return;
+        }
+        if (msg.type === 'log' && typeof msg.msg === 'string') {
+          addLog(msg.msg);
+          return;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    // Fetch initial jump config
+    async function loadConfig() {
+      try {
+        const resp = await fetch('/config');
+        if (!resp.ok) {
+          addLog('Config load failed with status ' + resp.status);
+          return;
+        }
+        const data = await resp.json();
+        const jc = data.jump || {};
+        if (typeof jc.min_jump_height_m === 'number') {
+          minHeightInput.value = jc.min_jump_height_m.toFixed(2);
+        }
+        if (typeof jc.min_jump_peak_az_no_g === 'number') {
+          minAzInput.value = jc.min_jump_peak_az_no_g.toFixed(1);
+        }
+        if (typeof jc.min_jump_peak_gz_deg_s === 'number') {
+          minGzInput.value = jc.min_jump_peak_gz_deg_s.toFixed(0);
+        }
+        if (typeof jc.min_new_event_separation_s === 'number') {
+          minSepInput.value = jc.min_new_event_separation_s.toFixed(1);
+        }
+      } catch (e) {
+        console.error(e);
+        addLog('Config load error: ' + e);
+      }
+    }
+
+    // Save jump config
+    saveConfigBtn.onclick = async function () {
+      const payload = {
+        min_jump_height_m: parseFloat(minHeightInput.value),
+        min_jump_peak_az_no_g: parseFloat(minAzInput.value),
+        min_jump_peak_gz_deg_s: parseFloat(minGzInput.value),
+        min_new_event_separation_s: parseFloat(minSepInput.value),
+      };
+      configStatus.textContent = 'Saving...';
+      try {
+        const resp = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jump: payload })
+        });
+        if (!resp.ok) {
+          configStatus.textContent = 'Save failed (' + resp.status + ')';
+          addLog('Config save failed with status ' + resp.status);
+          return;
+        }
+        const data = await resp.json();
+        configStatus.textContent = data.detail || 'Saved (reconnect to apply)';
+        addLog(data.detail || 'Jump config updated (reconnect to apply)');
+      } catch (e) {
+        console.error(e);
+        configStatus.textContent = 'Save error';
+        addLog('Config save error: ' + e);
+      }
+    };
+
+    // Start detection button – enables jump events once the sensor is stable.
+    if (startDetectBtn) {
+      startDetectBtn.onclick = async function () {
+        jumpStatus.textContent = 'Enabling...';
+        try {
+          const resp = await fetch('/detection/start', { method: 'POST' });
+          if (!resp.ok) {
+            jumpStatus.textContent = 'Error: ' + resp.status;
+            addLog('Detection start failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          jumpStatus.textContent = data.detail || 'Detection enabled';
+          addLog(data.detail || 'Jump detection enabled');
+        } catch (e) {
+          console.error(e);
+          jumpStatus.textContent = 'Error';
+          addLog('Detection start error: ' + e);
+        }
+      };
+    }
+
+    if (stopDetectBtn) {
+      stopDetectBtn.onclick = async function () {
+        jumpStatus.textContent = 'Disabling...';
+        try {
+          const resp = await fetch('/detection/stop', { method: 'POST' });
+          if (!resp.ok) {
+            jumpStatus.textContent = 'Error: ' + resp.status;
+            addLog('Detection stop failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          jumpStatus.textContent = data.detail || 'Detection disabled';
+          addLog(data.detail || 'Jump detection disabled');
+        } catch (e) {
+          console.error(e);
+          jumpStatus.textContent = 'Error';
+          addLog('Detection stop error: ' + e);
+        }
+      };
+    }
+
+    // Load configuration once WebSocket is ready.
+    loadConfig();
+  </script>
+</body>
+</html>
+"""
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
 	return INDEX_HTML
+
+
+@app.get("/jumps", response_class=HTMLResponse)
+async def jumps_page():
+	return JUMPS_HTML
 
 class ConnectionManager:
 	def __init__(self) -> None:
