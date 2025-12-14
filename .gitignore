@@ -5,3 +5,5 @@ venv
 pyvenv.cfg
 modules/__pycache__/
 deploy.sh
+data/*
+Papers/*

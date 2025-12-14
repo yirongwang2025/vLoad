@@ -2,15 +2,16 @@ import asyncio
 import json
 import os
 import time
-from typing import Set, Optional, Dict, Any
+from collections import deque
 from contextlib import asynccontextmanager
+from typing import Deque, Set, Optional, Dict, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Reuse your BLE client
-from movesense_gatt import MovesenseGATTClient
+from modules.movesense_gatt import MovesenseGATTClient
 from modules.jump_detector import JumpDetectorRealtime
 
 DEVICE = os.getenv("MOVE_DEVICE")  # e.g., "74:92:BA:10:F9:00" or exact name
@@ -21,7 +22,7 @@ RATE = int(os.getenv("MOVE_RATE", "104"))
 _ble_task: Optional[asyncio.Task] = None
 _ble_client: Optional[MovesenseGATTClient] = None
 
-# Jump detection config (Phase 2.5): tweakable via /config endpoint.
+# Jump detection config (Phase 2.5/2.6): tweakable via /config endpoint.
 JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
 	"min_jump_height_m": 0.15,
 	"min_jump_peak_az_no_g": 3.5,
@@ -30,13 +31,43 @@ JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
 }
 _jump_config: Dict[str, float] = dict(JUMP_CONFIG_DEFAULTS)
 
+# Async queue + worker task for decoupled jump analysis (Option A).
+_jump_sample_queue: Optional[asyncio.Queue] = None
+_jump_worker_task: Optional[asyncio.Task] = None
+
+# Rolling IMU history for export / offline analysis.
+IMU_HISTORY_MAX_SECONDS: float = 60.0
+_imu_history: Deque[Dict[str, Any]] = deque()
+
+# Manual gating for jump detection to avoid setup false‑positives.
+_jump_detection_enabled: bool = False
+
+
+def _jump_log_filter(message: str) -> None:
+	"""
+	Filter JumpDetector log lines before sending them to clients.
+
+	- Always forward Phase 1/2 diagnostics.
+	- Only forward [Jump] lines once detection has been manually enabled.
+	"""
+	global _jump_detection_enabled
+	if "[Jump]" in message and not _jump_detection_enabled:
+		return
+	_log_to_clients(f"[JumpDetector] {message}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-	global _ble_task, _ble_client
+	global _ble_task, _ble_client, _jump_sample_queue, _jump_worker_task, _imu_history
 	try:
+		# Start decoupled jump‑analysis worker and IMU history.
+		_jump_sample_queue = asyncio.Queue(maxsize=2000)
+		_imu_history = deque()
+		_jump_worker_task = asyncio.create_task(_jump_worker_loop())
+
 		yield
 	finally:
+		# Stop BLE worker
 		if _ble_task:
 			_ble_task.cancel()
 			try:
@@ -47,6 +78,20 @@ async def lifespan(app: FastAPI):
 			except Exception:
 				pass
 			_ble_task = None
+
+		# Stop jump‑analysis worker
+		if _jump_worker_task:
+			_jump_worker_task.cancel()
+			try:
+				await _jump_worker_task
+			except asyncio.CancelledError:
+				pass
+			except Exception:
+				pass
+		_jump_worker_task = None
+		_jump_sample_queue = None
+
+		# Disconnect BLE client
 		if _ble_client:
 			try:
 				await _ble_client.disconnect()
@@ -123,6 +168,19 @@ INDEX_HTML = """
     </div>
   </div>
 
+  <div style="margin-top: 10px; padding: 8px; border: 1px solid #ddd;">
+    <strong>Jump events</strong>
+    <div style="font-size: 12px; margin-top: 4px;">
+      <button id="startDetectBtn">Start detection</button>
+      <button id="stopDetectBtn" style="margin-left: 6px;">Stop detection</button>
+      <span id="jumpStatus" style="margin-left: 8px; color:#555;"></span>
+    </div>
+    <div style="font-size: 12px; margin-top: 4px;">
+      Total jumps: <span id="jumpCount">0</span>
+    </div>
+    <pre id="jumpList" style="height: 120px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #ffffff; font-size: 11px;"></pre>
+  </div>
+
   <div style="margin-top: 10px;">
     <strong>Log</strong>
     <pre id="logBox" style="height: 160px; overflow-y: auto; border: 1px solid #ddd; padding: 4px; background: #fafafa; font-size: 11px;"></pre>
@@ -146,6 +204,11 @@ INDEX_HTML = """
     const minSepInput = document.getElementById('minSepInput');
     const saveConfigBtn = document.getElementById('saveConfigBtn');
     const configStatus = document.getElementById('configStatus');
+    const startDetectBtn = document.getElementById('startDetectBtn');
+    const stopDetectBtn = document.getElementById('stopDetectBtn');
+    const jumpStatus = document.getElementById('jumpStatus');
+    const jumpCountEl = document.getElementById('jumpCount');
+    const jumpListEl = document.getElementById('jumpList');
 
     const maxPts = 150;  // number of points kept in history
     // Acceleration series
@@ -155,6 +218,8 @@ INDEX_HTML = """
     // Magnetometer series
     const magX = [], magY = [], magZ = [];
 
+    let jumpCount = 0;
+
     const colors = ['#1976d2', '#d32f2f', '#388e3c']; // x=blue, y=red, z=green
     let sampleRate = null; // Hz, from server messages
     let lastDrawTs = 0;    // throttle drawing to avoid overloading CPU
@@ -163,6 +228,29 @@ INDEX_HTML = """
       const ts = new Date().toISOString();
       logBox.textContent += `[${ts}] ${line}\n`;
       logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function addJump(ev) {
+      jumpCount += 1;
+      jumpCountEl.textContent = String(jumpCount);
+
+      var tPeak = (typeof ev.t_peak === 'number') ? ev.t_peak.toFixed(3) : '';
+      var T_f = (typeof ev.flight_time === 'number') ? ev.flight_time.toFixed(3) : '';
+      var h = (typeof ev.height === 'number') ? ev.height.toFixed(3) : '';
+      var accPeak = (typeof ev.acc_peak === 'number') ? ev.acc_peak.toFixed(2) : '';
+      var gyroPeak = (typeof ev.gyro_peak === 'number') ? ev.gyro_peak.toFixed(0) : '';
+      var phase = (typeof ev.rotation_phase === 'number') ? ev.rotation_phase.toFixed(2) : '';
+      var conf = (typeof ev.confidence === 'number') ? ev.confidence.toFixed(2) : '';
+
+      var line = 't_peak=' + tPeak + 's, T_f=' + T_f + 's, h=' + h + 'm, ' +
+                 'az_no_g=' + accPeak + ', ' +
+                 'gz=' + gyroPeak + ', phase=' + phase + ', conf=' + conf;
+
+      var existing = jumpListEl.textContent ? jumpListEl.textContent.split('\\n') : [];
+      existing.push(line);
+      var maxJumpLines = 50;
+      while (existing.length > maxJumpLines) existing.shift();
+      jumpListEl.textContent = existing.join('\\n');
     }
 
     // Restore last-used device from localStorage, if any
@@ -318,6 +406,11 @@ INDEX_HTML = """
       try {
         const msg = JSON.parse(ev.data);
 
+        if (msg.type === 'jump') {
+          addJump(msg);
+          return;
+        }
+
         // Log-type messages
         if (msg.type === 'log' && typeof msg.msg === 'string') {
           addLog(msg.msg);
@@ -456,6 +549,50 @@ INDEX_HTML = """
         addLog(`Config save error: ${e}`);
       }
     };
+
+    // Start detection button – enables jump events once the sensor is stable.
+    if (startDetectBtn) {
+      startDetectBtn.onclick = async () => {
+        jumpStatus.textContent = 'Enabling...';
+        try {
+          const resp = await fetch('/detection/start', { method: 'POST' });
+          if (!resp.ok) {
+            jumpStatus.textContent = 'Error: ' + resp.status;
+            addLog('Detection start failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          jumpStatus.textContent = data.detail || 'Detection enabled';
+          addLog(data.detail || 'Jump detection enabled');
+        } catch (e) {
+          console.error(e);
+          jumpStatus.textContent = 'Error';
+          addLog('Detection start error: ' + e);
+        }
+      };
+    }
+
+    // Stop detection button – disable jump events without disconnecting BLE.
+    if (stopDetectBtn) {
+      stopDetectBtn.onclick = async () => {
+        jumpStatus.textContent = 'Disabling...';
+        try {
+          const resp = await fetch('/detection/stop', { method: 'POST' });
+          if (!resp.ok) {
+            jumpStatus.textContent = 'Error: ' + resp.status;
+            addLog('Detection stop failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          jumpStatus.textContent = data.detail || 'Detection disabled';
+          addLog(data.detail || 'Jump detection disabled');
+        } catch (e) {
+          console.error(e);
+          jumpStatus.textContent = 'Error';
+          addLog('Detection stop error: ' + e);
+        }
+      };
+    }
   </script>
 </body>
 </html>
@@ -512,6 +649,58 @@ def _log_to_clients(message: str) -> None:
 	except RuntimeError:
 		# No running loop yet; ignore
 		pass
+
+
+async def _jump_worker_loop() -> None:
+	"""
+	Background task that consumes IMU samples from the queue and runs
+	JumpDetectorRealtime to emit structured jump events, decoupled from BLE.
+	"""
+	global _jump_sample_queue
+
+	# One detector instance per worker, using current config snapshot.
+	jump_detector = JumpDetectorRealtime(
+		sample_rate_hz=RATE,
+		window_seconds=3.0,
+		logger=_jump_log_filter,
+		config=_jump_config,
+	)
+
+	while True:
+		if _jump_sample_queue is None:
+			# Should not happen often; be defensive.
+			await asyncio.sleep(0.1)
+			continue
+
+		sample = await _jump_sample_queue.get()
+		try:
+			events = jump_detector.update(sample) or []
+		except Exception:
+			events = []
+
+		if not events:
+			continue
+
+		# Only emit jump messages once detection has been explicitly enabled.
+		if not _jump_detection_enabled:
+			continue
+
+		for ev in events:
+			try:
+				jump_msg = {
+					"type": "jump",
+					"t_peak": ev.get("t_peak"),
+					"flight_time": ev.get("flight_time"),
+					"height": ev.get("height"),
+					"acc_peak": ev.get("peak_az_no_g"),
+					"gyro_peak": ev.get("peak_gz"),
+					"rotation_phase": ev.get("rotation_phase"),
+					"confidence": ev.get("confidence"),
+				}
+				asyncio.create_task(manager.broadcast_json(jump_msg))
+			except Exception:
+				# Jump notifications are best‑effort; ignore errors.
+				pass
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
@@ -608,6 +797,29 @@ async def disconnect_device():
 	return {"detail": "Disconnected BLE worker and client"}
 
 
+@app.post("/detection/start")
+async def start_jump_detection():
+	"""
+	Manually enable jump detection, to avoid false positives during sensor
+	setup / strapping on.
+	"""
+	global _jump_detection_enabled
+	_jump_detection_enabled = True
+	_log_to_clients("[JumpDetector] Detection ENABLED via /detection/start")
+	return {"detail": "Jump detection enabled."}
+
+
+@app.post("/detection/stop")
+async def stop_jump_detection():
+	"""
+	Manually disable jump detection while keeping BLE streaming active.
+	"""
+	global _jump_detection_enabled
+	_jump_detection_enabled = False
+	_log_to_clients("[JumpDetector] Detection DISABLED via /detection/stop")
+	return {"detail": "Jump detection disabled."}
+
+
 @app.get("/config")
 async def get_config():
 	"""
@@ -651,20 +863,28 @@ def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 		out["mag_mag_first"] = float(mag_mag)
 	return out
 
+@app.get("/export")
+async def export_imu(seconds: float = 30.0):
+	"""
+	Export recent IMU history for offline analysis / labelling.
+
+	Returns JSON with samples from the last `seconds` (default: 30).
+	"""
+	now = time.time()
+	horizon = max(0.0, float(seconds))
+	cutoff = now - horizon
+
+	snap = list(_imu_history)
+	samples = [row for row in snap if float(row.get("t", 0.0)) >= cutoff]
+	return {"seconds": seconds, "count": len(samples), "samples": samples}
+
+
 async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
-	global _ble_client
+	global _ble_client, _jump_sample_queue, _imu_history
 	print(f"[BLE] Worker starting (device={device!r}, mode={mode}, rate={rate})")
 	_log_to_clients(f"BLE worker starting (device={device!r}, mode={mode}, rate={rate})")
 	client = MovesenseGATTClient()
 	_ble_client = client
-
-	# Phase 1/2: jump detector with current config snapshot
-	jump_detector = JumpDetectorRealtime(
-		sample_rate_hz=rate,
-		window_seconds=3.0,
-		logger=lambda msg: _log_to_clients(f"[JumpDetector] {msg}"),
-		config=_jump_config,
-	)
 
 	try:
 		if device:
@@ -708,21 +928,40 @@ async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
 				samples = decoded.get("samples", [])
 				first = samples[0] if samples else None
 
-				# Phase 1: feed samples into jump detector for vertical tracking
 				if samples:
-					now = time.time()
+					now_t = time.time()
 					for s in samples:
+						# Best‑effort: push to jump‑analysis queue without blocking BLE thread.
+						if _jump_sample_queue is not None:
+							try:
+								_jump_sample_queue.put_nowait(
+									{
+										"t": now_t,
+										"acc": s.get("acc", []),
+										"gyro": s.get("gyro", []),
+										"mag": s.get("mag", []),
+									}
+								)
+							except Exception:
+								# Queue backpressure or other issues: ignore and keep streaming.
+								pass
+
+						# Append to rolling IMU history for export
 						try:
-							jump_detector.update(
+							_imu_history.append(
 								{
-									"t": now,
+									"t": now_t,
+									"imu_timestamp": decoded.get("timestamp"),
 									"acc": s.get("acc", []),
 									"gyro": s.get("gyro", []),
 									"mag": s.get("mag", []),
 								}
 							)
+							cutoff = now_t - IMU_HISTORY_MAX_SECONDS
+							while _imu_history and float(_imu_history[0].get("t", 0.0)) < cutoff:
+								_imu_history.popleft()
 						except Exception:
-							# Never let diagnostics break the BLE stream
+							# History is best‑effort; ignore errors.
 							pass
 
 				msg = {

@@ -13,11 +13,19 @@ from .web_jump_detection import (
 
 class JumpDetectorRealtime:
 	"""
-	Phase 1: simple real‑time tracker for vertical acceleration / gyro.
+	Realtime vertical acceleration / gyro tracker + Bruening‑style jump detector.
 
-	This does NOT yet try to detect jumps. It just keeps a short rolling
-	window of samples (acc_z, gyro_z) and emits a one‑time log message so
-	we can verify that vertical tracking is working end‑to‑end.
+	Phases:
+	  - Phase 1:
+	      Keep a short rolling window of samples (acc_z, gyro_z) and emit a
+	      one‑time log message so we can verify vertical tracking end‑to‑end.
+	  - Phase 2.1–2.4:
+	      Periodically log diagnostics on preprocessing, vertical peaks,
+	      candidate jump windows, and basic jump metrics (height, ωz).
+	  - Phase 2.5/2.6:
+	      Promote enriched windows to higher‑confidence jump events using
+	      select_jump_events(...), log concise [Jump] lines, and return the
+	      new events so the server can forward them to the UI.
 
 	Expected sample format passed to `update`:
 	    {
@@ -80,8 +88,11 @@ class JumpDetectorRealtime:
 		"""
 		Ingest one IMU sample and update internal state.
 
-		Returns a (possibly empty) list of detected jump events. For Phase 1
-		this is always an empty list – jump detection comes in later phases.
+		Returns a (possibly empty) list of detected jump events. In quiet
+		motion this is usually [], while clear multi‑rev jumps will produce
+		a small number of well‑separated events with fields such as:
+		  - t_peak, flight_time, height, peak_az_no_g, peak_gz,
+		    rotation_phase, confidence.
 		"""
 		try:
 			acc = sample.get("acc") or []

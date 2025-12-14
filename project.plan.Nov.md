@@ -14,7 +14,7 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
 - Simple, responsive web UI that visualizes acceleration, gyro, and magnetometer data.
 
 **Key components**
-- `modules/movesense_gatt.py`
+- `movesense_gatt.py`
   - `MovesenseGATTClient` wraps Bleak and GSP:
     - `scan_for_movesense(...)` – cross‑platform scan for devices whose name contains `"Movesense"`.
     - `connect(address_or_name)` – connects by MAC or by name, verifying GSP service/characteristics.
@@ -174,14 +174,14 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
        - Phase 2.4 log line summarizing the first few candidates, e.g.:
          - `"[Phase2.4] Jump metrics: T_f=..., h=..., ωz=...°/s | ..."` for quick sanity‑checking of magnitude and timing.
 
-5. **Rotation speed and timing within the jump (Step 2.4 – COMPLETED within metrics above)**
+5. **Rotation speed and timing within the jump (Step 2.5 – COMPLETED within metrics above)**
    - Within the jump flight window (between the vertical‑acc peaks):
      - Compute \( \omega_z(t) \) from gyro; find **peak rotation speed** = max \(|\omega_z|\).
      - Record the **phase** of this peak within flight:
        - `rotation_phase = (t_peak − t_takeoff) / T_f` (expected to be near ~0.6–0.7 in many jumps, as reported in the paper).
    - Use these metrics for both performance feedback (rotation quality) and as an extra check that the event is a genuine multi‑revolution jump.
 
-6. **False‑positive control and confidence scoring (Step 2.5 – IN PROGRESS)**
+6. **False‑positive control and confidence scoring (Step 2.6 – COMPLETED)**
    - Goals:
      - Reject candidate windows that are too small (height/impulse/rotation) or too close together in time.
      - Assign a simple confidence score based on height, vertical impulse, and rotation speed.
@@ -202,7 +202,7 @@ The work is organized into explicit phases so we can validate each layer (BLE, d
            - Peak time, flight time, height, peak rotation speed, rotation phase, and confidence.
          - Return a list of new jump events so the server/UI can consume them later.
 
-7. **Real‑time integration**
+7. **Real‑time integration (Step 2.7 - COMPLETED)**
    - Once Steps 2.1–2.5 are validated, wire jump events into the FastAPI/WebSocket path:
      - Forward jump events from `JumpDetectorRealtime` to the browser as dedicated messages.
      - Add a simple jump list or counter in the UI, using the existing log as the primary debug channel.
@@ -259,5 +259,4 @@ python -m uvicorn server:app --host 0.0.0.0 --port 8080
 
 Then open the browser to `http://<server-ip>:8080`, click **Scan**, select or confirm the MAC, and click **Connect**.  
 You should see the three plots updating and, after a second or so, a `[JumpDetector][Phase1]` line in the log.
-
 

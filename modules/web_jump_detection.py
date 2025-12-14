@@ -2,17 +2,41 @@
 Phase 2.x – utilities for vertical acceleration / gyro processing.
 
 This module currently provides:
-  - Phase 2.1: basic preprocessing of vertical series.
-  - Phase 2.2: simple peak finding on the gravity‑removed vertical signal.
+  - Phase 2.1: preprocessing of vertical series (including simple smoothing).
+  - Phase 2.2: peak finding on the gravity‑removed vertical signal.
   - Phase 2.3: utilities for pairing peaks into candidate jump windows and
     computing simple flight‑time information.
   - Phase 2.4: utilities for deriving basic height / rotation metrics for
     each candidate window.
-  - Phase 2.5: utilities (added below) for filtering and scoring jump
-    candidates into higher‑confidence jump events.
+  - Phase 2.5/2.6: utilities for filtering and scoring jump candidates into
+    higher‑confidence jump events.
 """
 
+import math
 from typing import Dict, Any, List
+
+
+def _smooth_1pole(series: List[float], dt: float, cutoff_hz: float) -> List[float]:
+	"""
+	Simple first‑order low‑pass (one‑pole) filter.
+
+	This is deliberately light‑weight and SciPy‑free; it is enough to
+	reduce high‑frequency noise so that take‑off / landing structure
+	is clearer, without adding much phase lag at jump‑time scales.
+	"""
+	if not series or dt <= 0 or cutoff_hz <= 0:
+		return list(series)
+
+	# Standard RC one‑pole: alpha = dt / (RC + dt), RC = 1 / (2π f_c)
+	rc = 1.0 / (2.0 * math.pi * cutoff_hz)
+	alpha = dt / (rc + dt)
+
+	out: List[float] = [series[0]]
+	for i in range(1, len(series)):
+		prev = out[-1]
+		curr = series[i]
+		out.append(prev + alpha * (curr - prev))
+	return out
 
 
 def preprocess_vertical_series(buffer: List[Dict[str, float]]) -> Dict[str, Any]:
@@ -63,6 +87,18 @@ def preprocess_vertical_series(buffer: List[Dict[str, float]]) -> Dict[str, Any]
 
 	count = len(t_series)
 	duration = t_series[-1] - t_series[0] if count > 1 else 0.0
+	dt = duration / (count - 1) if count > 1 and duration > 0.0 else 0.0
+
+	# Light smoothing at ~10 Hz to emphasise jump‑scale structure.
+	cutoff_hz = 10.0
+	if dt > 0.0:
+		az_smooth = _smooth_1pole(az_series, dt, cutoff_hz)
+		az_no_g_smooth = _smooth_1pole(az_no_g_series, dt, cutoff_hz)
+		gz_smooth = _smooth_1pole(gz_series, dt, cutoff_hz)
+	else:
+		az_smooth = list(az_series)
+		az_no_g_smooth = list(az_no_g_series)
+		gz_smooth = list(gz_series)
 
 	max_abs_az = max(abs(v) for v in az_series)
 	max_abs_az_no_g = max(abs(v) for v in az_no_g_series)
@@ -73,6 +109,9 @@ def preprocess_vertical_series(buffer: List[Dict[str, float]]) -> Dict[str, Any]
 		"az": az_series,
 		"az_no_g": az_no_g_series,
 		"gz": gz_series,
+		"az_smooth": az_smooth,
+		"az_no_g_smooth": az_no_g_smooth,
+		"gz_smooth": gz_smooth,
 		"count": count,
 		"duration": duration,
 		"max_abs_az": max_abs_az,
@@ -95,10 +134,11 @@ def find_vertical_peaks(
 	  - |az_no_g[i]| >= min_height
 	  - At least `min_distance_samples` between accepted peaks.
 
-	Returns a list of indices into the `preprocessed["az_no_g"]` / `["t"]`
+	Returns a list of indices into the `preprocessed["az_no_g_smooth"]`
+	(or `["az_no_g"]` if smoothing is unavailable) / `["t"]`
 	series where peaks were detected.
 	"""
-	series = preprocessed.get("az_no_g") or []
+	series = preprocessed.get("az_no_g_smooth") or preprocessed.get("az_no_g") or []
 	n = len(series)
 	if n < 3 or min_distance_samples <= 0:
 		return []
@@ -207,8 +247,12 @@ def compute_window_metrics(
 		return []
 
 	t_series = preprocessed.get("t") or []
-	az_no_g = preprocessed.get("az_no_g") or []
-	gz = preprocessed.get("gz") or []
+	az_no_g = (
+		preprocessed.get("az_no_g_smooth")
+		or preprocessed.get("az_no_g")
+		or []
+	)
+	gz = preprocessed.get("gz_smooth") or preprocessed.get("gz") or []
 	n = min(len(t_series), len(az_no_g), len(gz))
 	if n == 0:
 		return []
@@ -272,9 +316,10 @@ def select_jump_events(
 	    rotation speed (peak_gz).
 	  - Enforce a minimum separation in time between emitted jumps.
 
-	Scoring (very simple heuristic confidence in [0, 1]):
+	Scoring (heuristic confidence in [0, 1]):
 	  - Normalize height, peak_az_no_g and peak_gz against nominal
-	    "good jump" scales and take a weighted average.
+	    "good jump" scales and combine with a simple rotation‑phase term.
+	  - Very low‑confidence events (< ~0.35) are discarded.
 	"""
 	if not windows_with_metrics:
 		return []
@@ -309,7 +354,8 @@ def select_jump_events(
 		if t_peak - last_t_peak < min_sep:
 			continue
 
-		# Compute a simple confidence score based on rough nominal scales.
+		# Compute a confidence score based on rough nominal scales and
+		# how "centrally" the rotation peak lies within the flight.
 		def _clip01(x: float) -> float:
 			return max(0.0, min(1.0, x))
 
@@ -317,17 +363,22 @@ def select_jump_events(
 		norm_a = _clip01(a / 6.0)  # ~6 m/s² vertical impulse above g
 		norm_g = _clip01(g / 800.0)  # ~800°/s as nominal strong rotation
 
-		conf = 0.4 * norm_h + 0.3 * norm_a + 0.3 * norm_g
+		T_f_safe = T_f if T_f > 1e-6 else 1.0
+		phase = (t_peak - float(w.get("t_takeoff", 0.0))) / T_f_safe
+		# Simple bell‑shaped preference around ~0.6 of flight.
+		phase_term = 1.0 - min(abs(phase - 0.6) / 0.5, 1.0)
+
+		conf_raw = 0.35 * norm_h + 0.25 * norm_a + 0.25 * norm_g + 0.15 * phase_term
+		conf = _clip01(conf_raw)
+
+		# Discard very low‑confidence windows outright.
+		if conf < 0.35:
+			continue
 
 		event = dict(w)
 		event["confidence"] = float(conf)
 		event["t_peak"] = t_peak
-
-		# Also expose a crude rotation phase within the flight window.
-		T_f_safe = T_f if T_f > 1e-6 else 1.0
-		event["rotation_phase"] = float(
-			(t_peak - float(w.get("t_takeoff", 0.0))) / T_f_safe
-		)
+		event["rotation_phase"] = float(phase)
 
 		selected.append(event)
 		last_t_peak = t_peak
