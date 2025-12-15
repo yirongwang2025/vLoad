@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Reuse your BLE client
 from modules.movesense_gatt import MovesenseGATTClient
+from modules import db
 from modules.jump_detector import JumpDetectorRealtime
 
 DEVICE = os.getenv("MOVE_DEVICE")  # e.g., "74:92:BA:10:F9:00" or exact name
@@ -39,6 +40,13 @@ _jump_worker_task: Optional[asyncio.Task] = None
 IMU_HISTORY_MAX_SECONDS: float = 60.0
 _imu_history: Deque[Dict[str, Any]] = deque()
 
+# In‑memory list of detected jump events for export / labelling.
+_jump_events: Deque[Dict[str, Any]] = deque(maxlen=1000)
+_next_event_id: int = 1
+
+# In‑memory annotations keyed by event_id (name, note, future labels).
+_jump_annotations: Dict[int, Dict[str, Any]] = {}
+
 # Manual gating for jump detection to avoid setup false‑positives.
 _jump_detection_enabled: bool = False
 
@@ -58,11 +66,23 @@ def _jump_log_filter(message: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-	global _ble_task, _ble_client, _jump_sample_queue, _jump_worker_task, _imu_history
+	global _ble_task, _ble_client, _jump_sample_queue, _jump_worker_task, _imu_history, _jump_events, _next_event_id, _jump_annotations
 	try:
+		# Initialise database (if configured).
+		try:
+			await db.init_db()
+		except Exception as e:
+			# DB is optional; log to clients and continue without persistence.
+			print(f"[DB] init_db failed: {e!r}")
+			# We deliberately don't call _log_to_clients here because WS manager
+			# may not be ready yet.
+
 		# Start decoupled jump‑analysis worker and IMU history.
 		_jump_sample_queue = asyncio.Queue(maxsize=2000)
 		_imu_history = deque()
+		_jump_events = deque(maxlen=1000)
+		_next_event_id = 1
+		_jump_annotations = {}
 		_jump_worker_task = asyncio.create_task(_jump_worker_loop())
 
 		yield
@@ -540,6 +560,7 @@ JUMPS_HTML = """
             <input id="jumpNameInput" type="text" style="width: 100%; box-sizing: border-box;">
           </label>
           <textarea id="jumpNote" rows="3" style="width: 100%; box-sizing: border-box;"></textarea>
+          <button id="saveAnnotationBtn" style="margin-top: 4px;">Save annotation</button>
         </div>
         <div style="margin-top: 4px; color:#777; font-size: 11px;">
           Name and notes are kept in this browser session for now; saving to disk/server will be added later.
@@ -569,6 +590,7 @@ JUMPS_HTML = """
     const configStatus = document.getElementById('configStatus');
     const jumpNameInput = document.getElementById('jumpNameInput');
     const jumpNote = document.getElementById('jumpNote');
+    const saveAnnotationBtn = document.getElementById('saveAnnotationBtn');
 
     let jumpCount = 0;
     const maxJumpItems = 100;
@@ -627,6 +649,9 @@ JUMPS_HTML = """
       if (jumpNameInput) {
         jumpNameInput.value = meta.name || '';
       }
+      if (jumpNote) {
+        jumpNote.value = meta.note || '';
+      }
     }
 
     function updateSelectionHighlight() {
@@ -646,10 +671,12 @@ JUMPS_HTML = """
       jumpCountEl.textContent = String(jumpCount);
 
       const index = jumps.length;
-      const defaultName = 'Jump ' + String(index + 1);
+      const defaultName = (typeof ev.event_id === 'number')
+        ? ('Jump ' + String(ev.event_id))
+        : ('Jump ' + String(index + 1));
       const timeLabel = formatTimeFromEpoch(ev.t_peak);
 
-      const meta = { ev: ev, name: defaultName, li: null };
+      const meta = { ev: ev, name: defaultName, note: '', li: null };
       jumps.push(meta);
 
       const li = document.createElement('li');
@@ -668,16 +695,62 @@ JUMPS_HTML = """
       }
     }
 
+    function updateNameFromInput() {
+      if (!jumpNameInput) return;
+      if (selectedIndex < 0 || selectedIndex >= jumps.length) return;
+      const meta = jumps[selectedIndex];
+      const raw = jumpNameInput.value || '';
+      const baseName = raw.trim() || ('Jump ' + String(selectedIndex + 1));
+      meta.name = baseName;
+      const timeLabel = formatTimeFromEpoch(meta.ev.t_peak);
+      if (meta.li) {
+        meta.li.textContent = baseName + (timeLabel ? (' (' + timeLabel + ')') : '');
+      }
+    }
+
     if (jumpNameInput) {
-      jumpNameInput.oninput = function () {
+      jumpNameInput.oninput = updateNameFromInput;
+    }
+
+    if (jumpNote) {
+      jumpNote.oninput = function () {
         if (selectedIndex < 0 || selectedIndex >= jumps.length) return;
         const meta = jumps[selectedIndex];
-        const raw = jumpNameInput.value || '';
-        const baseName = raw.trim() || ('Jump ' + String(selectedIndex + 1));
-        meta.name = baseName;
-        const timeLabel = formatTimeFromEpoch(meta.ev.t_peak);
-        if (meta.li) {
-          meta.li.textContent = baseName + (timeLabel ? (' (' + timeLabel + ')') : '');
+        meta.note = jumpNote.value || '';
+      };
+    }
+
+    if (saveAnnotationBtn) {
+      saveAnnotationBtn.onclick = async function () {
+        if (selectedIndex < 0 || selectedIndex >= jumps.length) {
+          addLog('No jump selected to annotate.');
+          return;
+        }
+        updateNameFromInput();
+        const meta = jumps[selectedIndex];
+        const ev = meta.ev;
+        const name = meta.name || '';
+        const note = meta.note || '';
+        const eventId = ev.event_id;
+        if (typeof eventId !== 'number') {
+          addLog('Cannot save annotation: missing event_id on jump.');
+          return;
+        }
+        try {
+          const resp = await fetch('/annotations/' + eventId, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, note: note })
+          });
+          if (!resp.ok) {
+            addLog('Annotation save failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          addLog('Annotation saved for event_id=' + eventId);
+        } catch (e) {
+          console.error(e);
+          addLog('Annotation save error: ' + e);
         }
       };
     }
@@ -873,7 +946,7 @@ async def _jump_worker_loop() -> None:
 	Background task that consumes IMU samples from the queue and runs
 	JumpDetectorRealtime to emit structured jump events, decoupled from BLE.
 	"""
-	global _jump_sample_queue
+	global _jump_sample_queue, _jump_events, _next_event_id, _jump_annotations
 
 	# One detector instance per worker, using current config snapshot.
 	jump_detector = JumpDetectorRealtime(
@@ -904,8 +977,12 @@ async def _jump_worker_loop() -> None:
 
 		for ev in events:
 			try:
+				event_id = _next_event_id
+				_next_event_id += 1
+
 				jump_msg = {
 					"type": "jump",
+					"event_id": event_id,
 					"t_peak": ev.get("t_peak"),
 					"flight_time": ev.get("flight_time"),
 					"height": ev.get("height"),
@@ -914,11 +991,41 @@ async def _jump_worker_loop() -> None:
 					"rotation_phase": ev.get("rotation_phase"),
 					"confidence": ev.get("confidence"),
 				}
+
+				# Keep a compact record for export / labelling.
+				record = dict(jump_msg)
+				record["t_takeoff"] = ev.get("t_takeoff")
+				record["t_landing"] = ev.get("t_landing")
+				_jump_events.append(record)
+
+				# Ensure there is at least a stub annotation (name can be overridden later).
+				if event_id not in _jump_annotations:
+					_jump_annotations[event_id] = {"name": f"Jump {event_id}", "note": None}
 				asyncio.create_task(manager.broadcast_json(jump_msg))
+
+				# Fire‑and‑forget persistence of this jump and its IMU window to DB.
+				try:
+					# Use a slightly wider window around t_peak for DB storage: [-2s, +3s].
+					t_peak_val = float(ev.get("t_peak", 0.0))
+					window_start = t_peak_val - 2.0
+					window_end = t_peak_val + 3.0
+					history_snapshot = list(_imu_history)
+					window_samples = [
+						row
+						for row in history_snapshot
+						if window_start <= float(row.get("t", 0.0)) <= window_end
+					]
+					ann = _jump_annotations.get(event_id) or {}
+					jump_for_db = dict(record)
+					jump_for_db["t_start"] = window_start
+					jump_for_db["t_end"] = window_end
+					asyncio.create_task(db.insert_jump_with_imu(jump_for_db, ann, window_samples))
+				except Exception as e:
+					# DB persistence is best‑effort; ignore errors here.
+					print(f"[DB] Error scheduling insert_jump_with_imu: {e!r}")
 			except Exception:
 				# Jump notifications are best‑effort; ignore errors.
 				pass
-
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
 	await manager.connect(websocket)
@@ -1037,6 +1144,45 @@ async def stop_jump_detection():
 	return {"detail": "Jump detection disabled."}
 
 
+@app.get("/annotations/{event_id}")
+async def get_annotation(event_id: int):
+	"""
+	Fetch stored annotation (name/note, later labels) for a jump event.
+	Returns {} if none exists.
+	"""
+	return _jump_annotations.get(event_id, {})
+
+
+@app.post("/annotations/{event_id}")
+async def set_annotation(event_id: int, payload: Dict[str, Any]):
+	"""
+	Store or update annotation for a jump event (name, note, future label fields).
+	"""
+	global _jump_annotations
+	data = payload or {}
+	current = _jump_annotations.get(event_id, {})
+	current.update(
+		{
+			"name": data.get("name", current.get("name")),
+			"note": data.get("note", current.get("note")),
+		}
+	)
+	_jump_annotations[event_id] = current
+	# Persist to DB as best‑effort (if configured).
+	try:
+		asyncio.create_task(
+			db.update_annotation(
+				event_id=event_id,
+				name=current.get("name"),
+				note=current.get("note"),
+			)
+		)
+	except Exception:
+		# DB persistence of annotations is best‑effort.
+		pass
+	return {"event_id": event_id, "annotation": current}
+
+
 @app.get("/config")
 async def get_config():
 	"""
@@ -1081,19 +1227,74 @@ def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 	return out
 
 @app.get("/export")
-async def export_imu(seconds: float = 30.0):
+async def export_imu(seconds: float = 30.0, mode: str = "raw"):
 	"""
-	Export recent IMU history for offline analysis / labelling.
+	Export recent IMU data for offline analysis / labelling.
 
-	Returns JSON with samples from the last `seconds` (default: 30).
+	Modes:
+	  - mode="raw" (default): return IMU samples from the last `seconds`.
+	  - mode="jumps": return per‑jump windows keyed by event_id, using
+	    detected jump events within the last `seconds`.
 	"""
 	now = time.time()
 	horizon = max(0.0, float(seconds))
 	cutoff = now - horizon
 
-	snap = list(_imu_history)
-	samples = [row for row in snap if float(row.get("t", 0.0)) >= cutoff]
-	return {"seconds": seconds, "count": len(samples), "samples": samples}
+	history_snapshot = list(_imu_history)
+
+	if mode == "jumps":
+		# Export per‑jump windows keyed by event_id. We use t_takeoff/t_landing
+		# if available; otherwise fall back to a symmetric window around t_peak.
+		events_snapshot = list(_jump_events)
+		windows = []
+		for ev in events_snapshot:
+			t_peak = float(ev.get("t_peak", 0.0))
+			if t_peak < cutoff:
+				continue
+			t0 = ev.get("t_takeoff")
+			t1 = ev.get("t_landing")
+			if t0 is None or t1 is None:
+				half = 0.75
+				t0 = t_peak - half
+				t1 = t_peak + half
+			t0 = float(t0)
+			t1 = float(t1)
+			if t1 <= t0:
+				continue
+
+			samples = [
+				row
+				for row in history_snapshot
+				if t0 <= float(row.get("t", 0.0)) <= t1
+			]
+
+			ann = _jump_annotations.get(int(ev.get("event_id", 0))) or {}
+
+			windows.append(
+				{
+					"event_id": ev.get("event_id"),
+					"t_peak": t_peak,
+					"t_start": t0,
+					"t_end": t1,
+					"meta": {
+						"flight_time": ev.get("flight_time"),
+						"height": ev.get("height"),
+						"acc_peak": ev.get("acc_peak"),
+						"gyro_peak": ev.get("gyro_peak"),
+						"rotation_phase": ev.get("rotation_phase"),
+						"confidence": ev.get("confidence"),
+						"name": ann.get("name"),
+						"note": ann.get("note"),
+					},
+					"samples": samples,
+				}
+			)
+
+		return {"mode": "jumps", "seconds": seconds, "count": len(windows), "windows": windows}
+
+	# Default: raw export of recent IMU samples.
+	samples = [row for row in history_snapshot if float(row.get("t", 0.0)) >= cutoff]
+	return {"mode": "raw", "seconds": seconds, "count": len(samples), "samples": samples}
 
 
 async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
