@@ -2,3 +2,5 @@ fastapi
 uvicorn[standard]
 bleak
 asyncpg
+pypdf==5.1.0
+depthai==3.2.1

@@ -1,0 +1,598 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Movesense Jumps</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    canvas { border: 1px solid #ddd; margin-top: 10px; }
+    .layout { display: flex; gap: 16px; align-items: flex-start; }
+    .leftPanel { width: 420px; min-width: 360px; }
+    .rightPanel { flex: 1; min-width: 560px; }
+    .panel { padding: 10px; border: 1px solid #ddd; margin-top: 12px; }
+    .panel h3 { margin: 0 0 8px 0; font-size: 14px; }
+    .small { font-size: 12px; color: #555; }
+    .btnRow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+    #jumpList { border: 1px solid #ddd; padding: 8px; max-height: 320px; overflow-y: auto; }
+    #jumpList li { font-size: 12px; margin-bottom: 6px; padding: 4px; cursor: pointer; }
+    #jumpList li.selected { background: #e3f2fd; }
+  </style>
+</head>
+<body>
+  <h2>Movesense Jump Analysis</h2>
+  <div style="margin-top: 8px; margin-bottom: 8px;">
+    <a href="/" style="padding:4px 8px; text-decoration:none; color:#1976d2;">Connect</a>
+    <span style="margin-left:8px; padding:4px 8px; border-bottom:2px solid #1976d2; font-weight:bold;">Jump review</span>
+  </div>
+
+  <div class="layout">
+    <!-- LEFT -->
+    <div class="leftPanel">
+      <div class="panel">
+        <h3>Detected Jumps (DB)</h3>
+        <div class="small">Ordered by detection time (descending).</div>
+        <div class="btnRow">
+          <button id="refreshBtn">Refresh</button>
+          <span id="dbStatus" class="small"></span>
+        </div>
+        <ul id="jumpList" style="list-style: none; padding-left: 0; margin-top: 8px;"></ul>
+      </div>
+
+      <div class="panel">
+        <h3>Selected Jump Detail</h3>
+        <div id="jumpDetail" style="font-size: 12px; margin-top: 6px;">
+          <div><em>No jump selected</em></div>
+        </div>
+        <div class="btnRow" style="margin-top: 8px;">
+          <button id="deleteJumpBtn" style="background:#d32f2f; color:#fff; border:1px solid #b71c1c;">Delete selected jump</button>
+          <span id="deleteStatus" class="small"></span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Jump Annotation</h3>
+        <div style="margin-top: 6px;">
+          <label style="display:block; margin-bottom:6px; font-size:12px;">
+            Jump name:
+            <input id="jumpNameInput" type="text" style="width: 100%; box-sizing: border-box;">
+          </label>
+          <textarea id="jumpNote" rows="4" style="width: 100%; box-sizing: border-box;"></textarea>
+          <div class="btnRow">
+            <button id="saveAnnotationBtn">Save annotation</button>
+            <span id="annotationStatus" class="small"></span>
+          </div>
+          <div class="small" style="margin-top:6px;">
+            Annotations are saved to server memory and best-effort persisted to DB (if configured).
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div class="rightPanel">
+      <div class="panel">
+        <h3>IMU plots (playback)</h3>
+        <div style="margin-top: 6px;">
+          <strong>Acceleration (X/Y/Z)</strong>
+          <canvas id="plotAcc" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+        </div>
+        <div style="margin-top: 10px;">
+          <strong>Gyro (X/Y/Z)</strong>
+          <canvas id="plotGyro" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+        </div>
+        <div style="margin-top: 10px;">
+          <strong>Magnetometer (X/Y/Z)</strong>
+          <canvas id="plotMag" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Video playback</h3>
+        <video id="videoPlayer" style="width:100%; border:1px solid #ddd; background:#000;" preload="metadata" controls></video>
+        <div class="btnRow" style="margin-top:8px;">
+          <button id="playBtn">Play</button>
+          <button id="stopBtn">Stop</button>
+          <button id="backBtn">Back</button>
+          <span id="playerStatus" class="small"></span>
+        </div>
+        <div class="small" style="margin-top:6px;">
+          Playback expects `video.mp4` in the session directory. If missing, stop the session to let the server auto-mux, or convert from `video.h264`.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Log</h3>
+    <pre id="logBox" style="height: 220px; overflow-y: auto; border: 1px solid #ddd; padding: 6px; background: #fafafa; font-size: 11px;"></pre>
+  </div>
+
+  <script>
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    const logBox = document.getElementById('logBox');
+    const jumpListEl = document.getElementById('jumpList');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const dbStatus = document.getElementById('dbStatus');
+
+    const jumpNameInput = document.getElementById('jumpNameInput');
+    const jumpNote = document.getElementById('jumpNote');
+    const saveAnnotationBtn = document.getElementById('saveAnnotationBtn');
+    const annotationStatus = document.getElementById('annotationStatus');
+    const deleteJumpBtn = document.getElementById('deleteJumpBtn');
+    const deleteStatus = document.getElementById('deleteStatus');
+
+    const videoPlayer = document.getElementById('videoPlayer');
+    const playBtn = document.getElementById('playBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const backBtn = document.getElementById('backBtn');
+    const playerStatus = document.getElementById('playerStatus');
+
+    const canvasAcc = document.getElementById('plotAcc');
+    const canvasGyro = document.getElementById('plotGyro');
+    const canvasMag = document.getElementById('plotMag');
+    const ctxAcc = canvasAcc.getContext('2d');
+    const ctxGyro = canvasGyro.getContext('2d');
+    const ctxMag = canvasMag.getContext('2d');
+
+    const maxJumpItems = 200;
+    const jumps = [];  // list rows from /db/jumps
+    let selectedIndex = -1;
+    let selectedJump = null; // detail from /db/jumps/{event_id}
+    let videoStartHost = null; // host epoch seconds for video t=0
+    let playbackRAF = null;
+
+    // Plot buffers
+    const maxPts = 150;
+    const accX = [], accY = [], accZ = [];
+    const gyroX = [], gyroY = [], gyroZ = [];
+    const magX = [], magY = [], magZ = [];
+    const colors = ['#1976d2', '#d32f2f', '#388e3c'];
+
+    function addLog(line) {
+      const ts = new Date().toISOString();
+      logBox.textContent += `[${ts}] ${line}\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    ws.onopen = () => addLog('WebSocket connected');
+    ws.onclose = () => addLog('WebSocket disconnected');
+    ws.onerror = () => addLog('WebSocket error');
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'log' && typeof msg.msg === 'string') addLog(msg.msg);
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    function fmt(num, digits) {
+      if (typeof num !== 'number' || !isFinite(num)) return '';
+      return num.toFixed(digits);
+    }
+
+    function formatTimeFromEpoch(tSec) {
+      if (typeof tSec !== 'number' || !isFinite(tSec)) return '';
+      const d = new Date(tSec * 1000);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      const ms = String(d.getMilliseconds()).padStart(3, '0');
+      return `${hh}:${mm}:${ss}.${ms}`;
+    }
+
+    function pushLimited(arr, value) {
+      arr.push(value);
+      while (arr.length > maxPts) arr.shift();
+    }
+
+    function drawSeries(ctx, series, sampleRateHint) {
+      const canvas = ctx.canvas;
+      const h = canvas.height, w = canvas.width;
+      const n = Math.max(series[0].length, series[1].length, series[2].length);
+      if (n <= 1) {
+        ctx.clearRect(0,0,w,h);
+        return;
+      }
+      let minV = Infinity, maxV = -Infinity;
+      series.forEach(arr => {
+        arr.forEach(v => {
+          if (v < minV) minV = v;
+          if (v > maxV) maxV = v;
+        });
+      });
+      if (!isFinite(minV) || !isFinite(maxV)) {
+        ctx.clearRect(0,0,w,h);
+        return;
+      }
+      if (maxV === minV) {
+        const pad = Math.max(0.5, Math.abs(maxV) * 0.1);
+        maxV += pad;
+        minV -= pad;
+      }
+      const range = maxV - minV;
+      const padding = 16;
+      ctx.clearRect(0,0,w,h);
+      ctx.fillStyle = '#000';
+      ctx.font = '10px sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(maxV.toFixed(2), 2, 2);
+      ctx.textBaseline = 'middle';
+      ctx.fillText(((maxV + minV) / 2).toFixed(2), 2, h / 2);
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(minV.toFixed(2), 2, h - 2);
+      ctx.textBaseline = 'bottom';
+      let timeLabel = 'Time';
+      if (sampleRateHint && n > 1) {
+        const seconds = n / sampleRateHint;
+        timeLabel += ` (~${seconds.toFixed(1)} s window)`;
+      }
+      const timeWidth = ctx.measureText(timeLabel).width;
+      ctx.fillText(timeLabel, (w - timeWidth) / 2, h - 2);
+      const legendX = w - 100;
+      const legendY = 4;
+      const names = ['X', 'Y', 'Z'];
+      ctx.textBaseline = 'top';
+      names.forEach((name, idx) => {
+        const y = legendY + idx * 12;
+        ctx.strokeStyle = colors[idx];
+        ctx.beginPath();
+        ctx.moveTo(legendX, y + 5);
+        ctx.lineTo(legendX + 15, y + 5);
+        ctx.stroke();
+        ctx.fillStyle = '#000';
+        ctx.fillText(name, legendX + 20, y + 1);
+      });
+      series.forEach((arr, idx) => {
+        if (!arr.length) return;
+        ctx.strokeStyle = colors[idx];
+        ctx.beginPath();
+        for (let i = 0; i < arr.length; i++) {
+          const x = (i / Math.max(1, maxPts-1)) * (w - 2 * padding) + padding;
+          const v = arr[i];
+          const norm = (v - minV) / range;
+          const y = h - (norm * (h - 2 * padding) + padding);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+    }
+
+    function redrawPlots(sampleRateHint) {
+      drawSeries(ctxAcc, [accX, accY, accZ], sampleRateHint);
+      drawSeries(ctxGyro, [gyroX, gyroY, gyroZ], sampleRateHint);
+      drawSeries(ctxMag, [magX, magY, magZ], sampleRateHint);
+    }
+
+    function updateSelectionHighlight() {
+      const children = jumpListEl.children;
+      for (let i = 0; i < children.length; i++) {
+        if (i === selectedIndex) children[i].classList.add('selected');
+        else children[i].classList.remove('selected');
+      }
+    }
+
+    function renderSelectedDetail() {
+      const detail = document.getElementById('jumpDetail');
+      if (!detail) return;
+      if (!selectedJump) {
+        detail.innerHTML = '<div><em>No jump selected</em></div>';
+        return;
+      }
+      const ev = selectedJump;
+      const sid = ev.session_id || '';
+      detail.innerHTML =
+        '<div><strong>event_id:</strong> ' + (ev.event_id ?? '') + '</div>' +
+        '<div><strong>t_peak:</strong> ' + fmt(ev.t_peak, 3) + ' (' + formatTimeFromEpoch(ev.t_peak) + ')</div>' +
+        '<div><strong>height:</strong> ' + fmt(ev.height, 3) + ' m</div>' +
+        '<div><strong>flight_time:</strong> ' + fmt(ev.flight_time, 3) + ' s</div>' +
+        '<div><strong>acc_peak:</strong> ' + fmt(ev.acc_peak, 2) + '</div>' +
+        '<div><strong>gyro_peak:</strong> ' + fmt(ev.gyro_peak, 0) + ' °/s</div>' +
+        '<div><strong>confidence:</strong> ' + fmt(ev.confidence, 2) + '</div>' +
+        (sid ? ('<div><strong>session_id:</strong> ' + sid + '</div>') : '<div class="small">No session linked (video playback unavailable)</div>');
+
+      if (jumpNameInput) jumpNameInput.value = ev.name || '';
+      if (jumpNote) jumpNote.value = ev.note || '';
+    }
+
+    function clearSelectionAndPlots() {
+      selectedIndex = -1;
+      selectedJump = null;
+      updateSelectionHighlight();
+      renderSelectedDetail();
+      // Clear plot series
+      accX.length = 0; accY.length = 0; accZ.length = 0;
+      gyroX.length = 0; gyroY.length = 0; gyroZ.length = 0;
+      magX.length = 0; magY.length = 0; magZ.length = 0;
+      redrawPlots(null);
+    }
+
+    async function loadJumpList() {
+      if (dbStatus) dbStatus.textContent = 'Loading...';
+      try {
+        const resp = await fetch('/db/jumps?limit=200');
+        if (!resp.ok) {
+          if (dbStatus) dbStatus.textContent = `Failed (${resp.status})`;
+          addLog('DB list failed: ' + resp.status);
+          return;
+        }
+        const data = await resp.json();
+        const list = data.jumps || [];
+        jumps.length = 0;
+        jumpListEl.innerHTML = '';
+        for (let i = 0; i < list.length && i < maxJumpItems; i++) {
+          const ev = list[i];
+          jumps.push(ev);
+          const name = ev.name || (typeof ev.event_id === 'number' ? ('Jump ' + ev.event_id) : ('Jump ' + (i + 1)));
+          const timeLabel = formatTimeFromEpoch(ev.t_peak);
+          const li = document.createElement('li');
+          li.textContent = name + (timeLabel ? (' (' + timeLabel + ')') : '');
+          li.onclick = () => selectJump(i);
+          jumpListEl.appendChild(li);
+        }
+        if (dbStatus) dbStatus.textContent = `Loaded ${jumps.length}`;
+        addLog(`Loaded ${jumps.length} jumps from DB.`);
+        // reset selection if list changed
+        clearSelectionAndPlots();
+      } catch (e) {
+        if (dbStatus) dbStatus.textContent = 'Error';
+        addLog('DB load error: ' + e);
+      }
+    }
+
+    async function ensureVideoStartHost(sessionId) {
+      videoStartHost = null;
+      try {
+        const fr = await fetch('/sessions/' + sessionId + '/frames');
+        if (!fr.ok) return;
+        const fdata = await fr.json();
+        const frames = fdata.frames || [];
+        if (frames.length && typeof frames[0].t_host === 'number') {
+          videoStartHost = frames[0].t_host;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    async function selectJump(index) {
+      selectedIndex = index;
+      updateSelectionHighlight();
+      const row = jumps[index];
+      if (!row || typeof row.event_id !== 'number') return;
+      addLog('Loading jump ' + row.event_id + '...');
+      try {
+        const resp = await fetch('/db/jumps/' + row.event_id);
+        if (!resp.ok) {
+          addLog('Jump detail fetch failed: ' + resp.status);
+          return;
+        }
+        selectedJump = await resp.json();
+        renderSelectedDetail();
+
+        // Load per-jump clip if available; fall back to session video.
+        const sid = selectedJump.session_id;
+        const clipPath = selectedJump.video_path;
+        if (clipPath && videoPlayer) {
+          if (playerStatus) playerStatus.textContent = 'Loading clip...';
+          videoPlayer.src = '/files?path=' + encodeURIComponent(clipPath);
+          videoPlayer.load();
+          // For clip playback, host alignment is "clip-local"; we can still update plots
+          // by mapping video time to host time using t_peak heuristic (good enough for MVP).
+          videoStartHost = null;
+          if (playerStatus) playerStatus.textContent = 'Ready (clip)';
+        } else if (sid && videoPlayer) {
+          if (playerStatus) playerStatus.textContent = 'Loading video...';
+          videoPlayer.src = '/sessions/' + sid + '/video';
+          videoPlayer.load();
+          await ensureVideoStartHost(sid);
+          if (playerStatus) {
+            playerStatus.textContent = videoStartHost != null ? ('Ready (session ' + sid + ')') : ('Ready, but frames.csv missing');
+          }
+        } else {
+          if (videoPlayer) {
+            videoPlayer.pause();
+            videoPlayer.removeAttribute('src');
+            videoPlayer.load();
+          }
+          if (playerStatus) playerStatus.textContent = 'No session/video linked';
+        }
+
+        // Initialize plots around t_peak (even before playing)
+        if (typeof selectedJump.t_peak === 'number') {
+          updatePlotsForHostTime(selectedJump.t_peak);
+        }
+      } catch (e) {
+        addLog('Select jump error: ' + e);
+      }
+    }
+
+    function stopPlaybackLoop() {
+      if (playbackRAF) {
+        cancelAnimationFrame(playbackRAF);
+        playbackRAF = null;
+      }
+    }
+
+    function updatePlotsForHostTime(tHost) {
+      if (!selectedJump || !Array.isArray(selectedJump.imu_samples)) return;
+      const src = selectedJump.imu_samples;
+      const windowSec = 3.0;
+      const t0 = tHost - windowSec;
+      const t1 = tHost;
+
+      accX.length = accY.length = accZ.length = 0;
+      gyroX.length = gyroY.length = gyroZ.length = 0;
+      magX.length = magY.length = magZ.length = 0;
+
+      // Decimate based on number of samples in window.
+      let countInWindow = 0;
+      for (let i = 0; i < src.length; i++) {
+        const tt = src[i].t;
+        if (typeof tt !== 'number') continue;
+        if (tt >= t0 && tt <= t1) countInWindow++;
+      }
+      const decim = Math.max(1, Math.floor(countInWindow / maxPts));
+      let seen = 0;
+      for (let i = 0; i < src.length; i++) {
+        const s = src[i];
+        const tt = s.t;
+        if (typeof tt !== 'number') continue;
+        if (tt < t0 || tt > t1) continue;
+        seen += 1;
+        if ((seen % decim) !== 0) continue;
+        const a = s.acc || [];
+        const g = s.gyro || [];
+        const m = s.mag || [];
+        pushLimited(accX, a[0] ?? 0); pushLimited(accY, a[1] ?? 0); pushLimited(accZ, a[2] ?? 0);
+        pushLimited(gyroX, g[0] ?? 0); pushLimited(gyroY, g[1] ?? 0); pushLimited(gyroZ, g[2] ?? 0);
+        pushLimited(magX, m[0] ?? 0); pushLimited(magY, m[1] ?? 0); pushLimited(magZ, m[2] ?? 0);
+      }
+      redrawPlots(50);
+    }
+
+    function playbackLoop() {
+      if (!videoPlayer || videoPlayer.paused || videoPlayer.ended) {
+        stopPlaybackLoop();
+        return;
+      }
+      // If we have session mapping, sync to host time; otherwise update using jump t_peak as anchor.
+      if (videoStartHost != null) {
+        const tHost = videoStartHost + videoPlayer.currentTime;
+        updatePlotsForHostTime(tHost);
+      } else if (selectedJump && typeof selectedJump.t_peak === 'number') {
+        const tHost = selectedJump.t_peak + (videoPlayer.currentTime - 1.0); // assume play seeks to ~t_peak-1s
+        updatePlotsForHostTime(tHost);
+      }
+      playbackRAF = requestAnimationFrame(playbackLoop);
+    }
+
+    if (playBtn) {
+      playBtn.onclick = async function () {
+        if (!selectedJump || !videoPlayer) {
+          addLog('Select a jump first.');
+          return;
+        }
+        if (!selectedJump.session_id) {
+          addLog('Selected jump has no session_id; cannot play video.');
+          return;
+        }
+        if (videoStartHost != null && typeof selectedJump.t_peak === 'number') {
+          const pre = 1.0;
+          const target = Math.max(0, (selectedJump.t_peak - pre) - videoStartHost);
+          if (isFinite(target)) videoPlayer.currentTime = target;
+        }
+        try {
+          await videoPlayer.play();
+          stopPlaybackLoop();
+          playbackRAF = requestAnimationFrame(playbackLoop);
+        } catch (e) {
+          addLog('Video play failed: ' + e);
+        }
+      };
+    }
+
+    if (stopBtn) {
+      stopBtn.onclick = function () {
+        if (!videoPlayer) return;
+        videoPlayer.pause();
+        videoPlayer.currentTime = 0;
+        stopPlaybackLoop();
+      };
+    }
+
+    if (backBtn) {
+      backBtn.onclick = function () {
+        if (!videoPlayer) return;
+        videoPlayer.currentTime = Math.max(0, videoPlayer.currentTime - 2.0);
+        if (videoStartHost != null) {
+          updatePlotsForHostTime(videoStartHost + videoPlayer.currentTime);
+        }
+      };
+    }
+
+    videoPlayer.addEventListener('timeupdate', () => {
+      if (videoStartHost != null) {
+        updatePlotsForHostTime(videoStartHost + videoPlayer.currentTime);
+      }
+    });
+
+    if (saveAnnotationBtn) {
+      saveAnnotationBtn.onclick = async function () {
+        if (!selectedJump || typeof selectedJump.event_id !== 'number') {
+          addLog('No jump selected to annotate.');
+          return;
+        }
+        const eventId = selectedJump.event_id;
+        const name = (jumpNameInput ? (jumpNameInput.value || '') : '').trim();
+        const note = (jumpNote ? (jumpNote.value || '') : '').trim();
+        try {
+          if (annotationStatus) annotationStatus.textContent = 'Saving...';
+          const resp = await fetch('/annotations/' + eventId, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, note })
+          });
+          if (!resp.ok) {
+            if (annotationStatus) annotationStatus.textContent = 'Save failed';
+            addLog('Save annotation failed (' + resp.status + ')');
+            return;
+          }
+          const data = await resp.json();
+          selectedJump.name = name;
+          selectedJump.note = note;
+          if (annotationStatus) annotationStatus.textContent = 'Saved';
+          addLog(data.detail || 'Annotation saved');
+          // Refresh list item text locally
+          await loadJumpList();
+        } catch (e) {
+          if (annotationStatus) annotationStatus.textContent = 'Save error';
+          addLog('Save annotation error: ' + e);
+        }
+      };
+    }
+
+    if (deleteJumpBtn) {
+      deleteJumpBtn.onclick = async function () {
+        if (!selectedJump || typeof selectedJump.event_id !== 'number') {
+          addLog('No jump selected to delete.');
+          return;
+        }
+        const eventId = selectedJump.event_id;
+        const name = (jumpNameInput ? (jumpNameInput.value || '') : '').trim();
+        const label = name ? `${name} (event_id=${eventId})` : `event_id=${eventId}`;
+        if (!confirm('Delete selected jump from DB?\n\n' + label + '\n\nThis will also delete its IMU samples. This cannot be undone.')) {
+          return;
+        }
+        try {
+          if (deleteStatus) deleteStatus.textContent = 'Deleting...';
+          const resp = await fetch('/db/jumps/' + eventId, { method: 'DELETE' });
+          if (!resp.ok) {
+            if (deleteStatus) deleteStatus.textContent = 'Delete failed';
+            addLog('Delete failed (' + resp.status + ')');
+            return;
+          }
+          const data = await resp.json();
+          addLog(data.detail || ('Deleted jump event_id=' + eventId));
+          if (deleteStatus) deleteStatus.textContent = 'Deleted';
+          await loadJumpList();
+          clearSelectionAndPlots();
+        } catch (e) {
+          if (deleteStatus) deleteStatus.textContent = 'Delete error';
+          addLog('Delete error: ' + e);
+        }
+      };
+    }
+
+    if (refreshBtn) {
+      refreshBtn.onclick = loadJumpList;
+    }
+
+    // Initial
+    redrawPlots(null);
+    loadJumpList();
+  </script>
+</body>
+</html>
+
+

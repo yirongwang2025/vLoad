@@ -1,0 +1,720 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Movesense Live</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    #status { margin-bottom: 10px; }
+    #data { white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    canvas { border: 1px solid #ddd; margin-top: 10px; }
+    .page { display: flex; flex-direction: column; gap: 12px; }
+    .layout { display: flex; gap: 16px; align-items: flex-start; }
+    .leftPanel { width: 360px; min-width: 320px; }
+    .rightPanel { flex: 1; min-width: 560px; }
+    .panel { padding: 10px; border: 1px solid #ddd; margin-top: 12px; }
+    .panel h3 { margin: 0 0 8px 0; font-size: 14px; }
+    .btnRow { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .small { font-size: 12px; color: #555; }
+    .fieldRow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+    .fieldRow label { font-size: 12px; }
+    .fieldRow input { width: 74px; }
+  </style>
+</head>
+<body>
+  <h2>Movesense Live IMU</h2>
+  <div style="margin-top: 8px; margin-bottom: 8px;">
+    <span style="padding:4px 8px; border-bottom:2px solid #1976d2; font-weight:bold;">Connect</span>
+    <a href="/jumps" style="margin-left:8px; padding:4px 8px; text-decoration:none; color:#1976d2;">Jump Review</a>
+  </div>
+
+  <div class="page">
+  <div class="layout">
+    <!-- LEFT: connect controls + controls -->
+    <div class="leftPanel">
+      <div class="panel">
+        <h3>Connect Sensor</h3>
+        <div>
+          <label for="deviceInput"><strong>Device MAC / name:</strong></label><br/>
+          <input id="deviceInput" type="text" size="24" placeholder="74:92:BA:10:F9:00" />
+        </div>
+        <div class="btnRow">
+          <button id="scanBtn">Scan</button>
+          <button id="connectBtn">Connect</button>
+          <button id="disconnectBtn">Disconnect</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Connect Video</h3>
+        <div class="btnRow">
+          <button id="videoConnectBtn">Video Connect</button>
+          <button id="videoDisconnectBtn">Video Disconnect</button>
+        </div>
+
+        <div style="margin-top: 12px; border-top: 1px dashed #ddd; padding-top: 10px;">
+          <strong style="font-size: 13px;">Jump Detection</strong>
+          <div class="btnRow" style="margin-top: 6px;">
+            <button id="startDetectBtn">Start detection</button>
+            <button id="stopDetectBtn">Stop detection</button>
+            <span id="detectStatus" class="small" style="margin-left: 6px;"></span>
+          </div>
+          <div class="small" style="margin-top: 6px;">
+            Total jumps (this session): <span id="jumpCount">0</span>
+          </div>
+
+          <div class="fieldRow">
+            <label>Min height (m):
+              <input id="minHeightInput" type="number" step="0.01">
+            </label>
+            <label>Min |az-g| (m/s²):
+              <input id="minAzInput" type="number" step="0.1">
+            </label>
+            <label>Min ωz (°/s):
+              <input id="minGzInput" type="number" step="10">
+            </label>
+            <label>Min separation (s):
+              <input id="minSepInput" type="number" step="0.1">
+            </label>
+            <label>Min revs:
+              <input id="minRevsInput" type="number" step="0.1">
+            </label>
+          </div>
+          <div class="btnRow">
+            <button id="saveConfigBtn">Save detection settings</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: plots (top) + video preview (bottom) -->
+    <div class="rightPanel">
+      <div class="panel">
+        <h3>IMU plots</h3>
+        <div style="margin-top: 6px;">
+          <strong>Acceleration (X/Y/Z)</strong>
+          <canvas id="plotAcc" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+        </div>
+        <div style="margin-top: 10px;">
+          <strong>Gyro (X/Y/Z)</strong>
+          <canvas id="plotGyro" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+        </div>
+        <div style="margin-top: 10px;">
+          <strong>Magnetometer (X/Y/Z)</strong>
+          <canvas id="plotMag" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Video preview</h3>
+        <img id="videoFeed" alt="OAK-D stream" style="width: 100%; max-width: 100%; border: 1px solid #ddd; background:#000; display:block;" />
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top: 0;">
+    <h3>Log</h3>
+    <pre id="logBox" style="height: 220px; overflow-y: auto; border: 1px solid #ddd; padding: 6px; background: #fafafa; font-size: 11px;"></pre>
+  </div>
+  </div>
+  <script>
+    // WebSocket: add ping + reconnect + heartbeat to diagnose freezes/stalls.
+    let ws = null;
+    let _wsReconnectAttempt = 0;
+    let _wsPingTimer = null;
+    let _hbTimer = null;
+    let _lastWsMsgMs = 0;
+    let _lastImuMsgMs = 0;
+    let _imuMsgCount = 0;
+    let _imuSampleCount = 0;
+    let _hbLastImuMsgCount = 0;
+    let _hbLastImuSampleCount = 0;
+    let _hbLastMs = null;
+
+    const LOG_MAX_LINES = 600;
+    const HEARTBEAT_EVERY_MS = 5000;
+    const WS_PING_EVERY_MS = 2000;
+    const WS_RECONNECT_BASE_MS = 500;
+    const WS_RECONNECT_MAX_MS = 5000;
+    const deviceInput = document.getElementById('deviceInput');
+    const scanBtn = document.getElementById('scanBtn');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const videoConnectBtn = document.getElementById('videoConnectBtn');
+    const videoDisconnectBtn = document.getElementById('videoDisconnectBtn');
+    const startDetectBtn = document.getElementById('startDetectBtn');
+    const stopDetectBtn = document.getElementById('stopDetectBtn');
+    const detectStatus = document.getElementById('detectStatus');
+    const jumpCountEl = document.getElementById('jumpCount');
+    const minHeightInput = document.getElementById('minHeightInput');
+    const minAzInput = document.getElementById('minAzInput');
+    const minGzInput = document.getElementById('minGzInput');
+    const minSepInput = document.getElementById('minSepInput');
+    const minRevsInput = document.getElementById('minRevsInput');
+    const saveConfigBtn = document.getElementById('saveConfigBtn');
+    const videoFeed = document.getElementById('videoFeed');
+    // Video preview diagnostics
+    if (videoFeed) {
+      videoFeed.onerror = function () {
+        addLog('Video preview error (failed to load /video/mjpeg). Try opening /video/snapshot.jpg and /video/debug.');
+      };
+      videoFeed.onload = function () {
+        // This may fire repeatedly for MJPEG in some browsers; keep it quiet.
+      };
+    }
+    const logBox = document.getElementById('logBox');
+    const canvasAcc = document.getElementById('plotAcc');
+    const canvasGyro = document.getElementById('plotGyro');
+    const canvasMag = document.getElementById('plotMag');
+    const ctxAcc = canvasAcc.getContext('2d');
+    const ctxGyro = canvasGyro.getContext('2d');
+    const ctxMag = canvasMag.getContext('2d');
+
+    const maxPts = 150;  // number of points kept in history
+    // Acceleration series
+    const accX = [], accY = [], accZ = [];
+    // Gyro series
+    const gyroX = [], gyroY = [], gyroZ = [];
+    // Magnetometer series
+    const magX = [], magY = [], magZ = [];
+
+    const colors = ['#1976d2', '#d32f2f', '#388e3c']; // x=blue, y=red, z=green
+    let sampleRate = null; // Hz, from server messages
+    let lastDrawTs = 0;    // throttle drawing to avoid overloading CPU
+    let plotDirty = false; // only redraw when new samples arrive
+    let _imuSampleCounter = 0; // for plot decimation
+    const TARGET_PLOT_HZ = 80; // cap plotted sample rate to keep UI responsive (especially w/ video)
+
+    function addLog(line) {
+      const ts = new Date().toISOString();
+      logBox.textContent += `[${ts}] ${line}\n`;
+      // Prevent unbounded log growth (can freeze the tab over time).
+      const lines = logBox.textContent.split('\n');
+      if (lines.length > LOG_MAX_LINES) {
+        logBox.textContent = lines.slice(lines.length - LOG_MAX_LINES).join('\n');
+      }
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function wsStateLabel(wsObj) {
+      if (!wsObj) return 'none';
+      const rs = wsObj.readyState;
+      if (rs === WebSocket.CONNECTING) return 'CONNECTING';
+      if (rs === WebSocket.OPEN) return 'OPEN';
+      if (rs === WebSocket.CLOSING) return 'CLOSING';
+      if (rs === WebSocket.CLOSED) return 'CLOSED';
+      return String(rs);
+    }
+
+    function stopWsTimers() {
+      if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
+      if (_hbTimer) { clearInterval(_hbTimer); _hbTimer = null; }
+    }
+
+    function startWsTimers() {
+      // Client -> server ping to keep server receive loop active.
+      if (!_wsPingTimer) {
+        _wsPingTimer = setInterval(() => {
+          try {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+          } catch (e) {
+            // ignore
+          }
+        }, WS_PING_EVERY_MS);
+      }
+
+      // Light heartbeat in the log.
+      if (!_hbTimer) {
+        _hbTimer = setInterval(() => {
+          const now = Date.now();
+          const dtMs = _hbLastMs == null ? null : (now - _hbLastMs);
+          _hbLastMs = now;
+          const wsState = wsStateLabel(ws);
+          const sinceWs = _lastWsMsgMs ? (now - _lastWsMsgMs) : null;
+          const sinceImu = _lastImuMsgMs ? (now - _lastImuMsgMs) : null;
+          const dMsgs = _imuMsgCount - _hbLastImuMsgCount;
+          const dSamp = _imuSampleCount - _hbLastImuSampleCount;
+          _hbLastImuMsgCount = _imuMsgCount;
+          _hbLastImuSampleCount = _imuSampleCount;
+          const wsPart = sinceWs == null ? 'ws_rx=never' : `ws_rx=${(sinceWs/1000).toFixed(1)}s ago`;
+          const imuPart = sinceImu == null ? 'imu_rx=never' : `imu_rx=${(sinceImu/1000).toFixed(1)}s ago`;
+          const dtPart = dtMs == null ? 'dt=?' : `dt=${(dtMs/1000).toFixed(2)}s`;
+          const sampHz = dtMs == null || dtMs <= 0 ? null : (dSamp * 1000.0 / dtMs);
+          const msgHz = dtMs == null || dtMs <= 0 ? null : (dMsgs * 1000.0 / dtMs);
+          const ratePart = sampHz == null ? '' : `, imu_rate≈${sampHz.toFixed(1)}Hz, imu_msg_rate≈${msgHz.toFixed(1)}/s`;
+          addLog(`[HB] ws=${wsState}, ${wsPart}, ${imuPart}, ${dtPart}, imu_msgs+${dMsgs}, imu_samples+${dSamp}${ratePart}`);
+        }, HEARTBEAT_EVERY_MS);
+      }
+    }
+
+    function scheduleWsReconnect() {
+      _wsReconnectAttempt += 1;
+      const delay = Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * Math.pow(1.6, _wsReconnectAttempt));
+      addLog(`WebSocket reconnect scheduled in ${(delay/1000).toFixed(1)}s...`);
+      setTimeout(() => {
+        connectWebSocket();
+      }, delay);
+    }
+
+    function connectWebSocket() {
+      try {
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      } catch (e) {
+        // ignore
+      }
+
+      stopWsTimers();
+      ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+
+      ws.onopen = () => {
+        _wsReconnectAttempt = 0;
+        addLog('WebSocket connected');
+        startWsTimers();
+      };
+      ws.onclose = () => {
+        addLog('WebSocket disconnected');
+        stopWsTimers();
+        scheduleWsReconnect();
+      };
+      ws.onerror = () => { addLog('WebSocket error'); };
+
+      ws.onmessage = (ev) => {
+        _lastWsMsgMs = Date.now();
+        try {
+          const msg = JSON.parse(ev.data);
+
+          // Log-type messages
+          if (msg.type === 'log' && typeof msg.msg === 'string') {
+            addLog(msg.msg);
+            return;
+          }
+
+          // Jump events (if detection enabled)
+          if (msg.type === 'jump') {
+            _jumpCount += 1;
+            if (jumpCountEl) jumpCountEl.textContent = String(_jumpCount);
+            // Keep it short to avoid spamming; details are on /jumps page
+            addLog(`Jump detected (event_id=${msg.event_id ?? ''}, rev≈${(typeof msg.revolutions_est === 'number') ? msg.revolutions_est.toFixed(1) : ''})`);
+            return;
+          }
+
+          // IMU data messages
+          if (typeof msg.rate === 'number') {
+            sampleRate = msg.rate;
+          }
+          // Prefer full packet samples for smoother plotting; fall back to first_sample.
+          const samples = Array.isArray(msg.samples) ? msg.samples : (msg.first_sample ? [msg.first_sample] : []);
+          if (samples.length) {
+            _imuMsgCount += 1;
+            _imuSampleCount += samples.length;
+            _lastImuMsgMs = Date.now();
+            const decim = Math.max(1, Math.round(((sampleRate || 0) > 0 ? sampleRate : 200) / TARGET_PLOT_HZ));
+            for (const s of samples) {
+              _imuSampleCounter += 1;
+              if ((_imuSampleCounter % decim) !== 0) continue;
+              if (s && Array.isArray(s.acc)) {
+                const a = s.acc;
+                pushLimited(accX, a[0] ?? 0);
+                pushLimited(accY, a[1] ?? 0);
+                pushLimited(accZ, a[2] ?? 0);
+              }
+              if (s && Array.isArray(s.gyro)) {
+                const g = s.gyro;
+                pushLimited(gyroX, g[0] ?? 0);
+                pushLimited(gyroY, g[1] ?? 0);
+                pushLimited(gyroZ, g[2] ?? 0);
+              }
+              if (s && Array.isArray(s.mag)) {
+                const m = s.mag;
+                pushLimited(magX, m[0] ?? 0);
+                pushLimited(magY, m[1] ?? 0);
+                pushLimited(magZ, m[2] ?? 0);
+              }
+            }
+            plotDirty = true;
+          }
+        } catch(e) {
+          console.error(e);
+        }
+      };
+    }
+
+    let _lastVideoState = null;   // {running, has_frame, error}
+    let _lastSessionId = null;
+    let _jumpCount = 0;
+
+    // Restore last-used device from localStorage, if any
+    try {
+      const last = localStorage.getItem('vload_last_device');
+      if (last) {
+        deviceInput.value = last;
+        addLog(`Restored last device from storage: ${last}`);
+      }
+    } catch (e) {
+      console.error('localStorage error', e);
+    }
+
+    function pushLimited(arr, value) {
+      arr.push(value);
+      while (arr.length > maxPts) arr.shift();
+    }
+
+    function drawSeries(ctx, series) {
+      const canvas = ctx.canvas;
+      const h = canvas.height, w = canvas.width;
+
+      const n = Math.max(series[0].length, series[1].length, series[2].length);
+      if (n <= 1) {
+        ctx.clearRect(0,0,w,h);
+        return;
+      }
+
+      // Dynamic scale
+      let minV = Infinity, maxV = -Infinity;
+      series.forEach(arr => {
+        arr.forEach(v => {
+          if (v < minV) minV = v;
+          if (v > maxV) maxV = v;
+        });
+      });
+
+      if (!isFinite(minV) || !isFinite(maxV)) {
+        ctx.clearRect(0,0,w,h);
+        return;
+      }
+      if (maxV === minV) {
+        const pad = Math.max(0.5, Math.abs(maxV) * 0.1);
+        maxV += pad;
+        minV -= pad;
+      }
+
+      const range = maxV - minV;
+      const padding = 16;
+
+      ctx.clearRect(0,0,w,h);
+
+      // Y labels
+      ctx.fillStyle = '#000';
+      ctx.font = '10px sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(maxV.toFixed(2), 2, 2);
+      ctx.textBaseline = 'middle';
+      ctx.fillText(((maxV + minV) / 2).toFixed(2), 2, h / 2);
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(minV.toFixed(2), 2, h - 2);
+
+      // X/time label
+      ctx.textBaseline = 'bottom';
+      let timeLabel = 'Time';
+      if (sampleRate && n > 1) {
+        const seconds = n / sampleRate;
+        timeLabel += ` (~${seconds.toFixed(1)} s window)`;
+      }
+      const timeWidth = ctx.measureText(timeLabel).width;
+      ctx.fillText(timeLabel, (w - timeWidth) / 2, h - 2);
+
+      // Legend
+      const legendX = w - 100;
+      const legendY = 4;
+      const names = ['X', 'Y', 'Z'];
+      ctx.textBaseline = 'top';
+      names.forEach((name, idx) => {
+        const y = legendY + idx * 12;
+        ctx.strokeStyle = colors[idx];
+        ctx.beginPath();
+        ctx.moveTo(legendX, y + 5);
+        ctx.lineTo(legendX + 15, y + 5);
+        ctx.stroke();
+        ctx.fillStyle = '#000';
+        ctx.fillText(name, legendX + 20, y + 1);
+      });
+
+      // Plot
+      series.forEach((arr, idx) => {
+        if (!arr.length) return;
+        ctx.strokeStyle = colors[idx];
+        ctx.beginPath();
+        for (let i = 0; i < arr.length; i++) {
+          const x = (i / Math.max(1, maxPts-1)) * (w - 2 * padding) + padding;
+          const v = arr[i];
+          const norm = (v - minV) / range;
+          const y = h - (norm * (h - 2 * padding) + padding);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+    }
+
+    function draw() {
+      const now = performance.now();
+      // Only redraw when data changed; keeps CPU low while video decoding is active.
+      if (!plotDirty) {
+        requestAnimationFrame(draw);
+        return;
+      }
+      // Lower draw FPS when video is running (MJPEG decode can be heavy on the main thread).
+      const videoRunning = _lastVideoState && _lastVideoState.running;
+      const minIntervalMs = videoRunning ? 66 : 33; // ~15fps with video, ~30fps otherwise
+      if (now - lastDrawTs < minIntervalMs) {
+        requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawTs = now;
+      plotDirty = false;
+      drawSeries(ctxAcc, [accX, accY, accZ]);
+      drawSeries(ctxGyro, [gyroX, gyroY, gyroZ]);
+      drawSeries(ctxMag, [magX, magY, magZ]);
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+
+    // Start the WS connection (with ping + reconnect + heartbeat).
+    connectWebSocket();
+
+    // Scan button: call /scan, fill first device into input, and show brief status
+    scanBtn.onclick = async () => {
+      addLog('Scan button clicked: starting scan...');
+      try {
+        const resp = await fetch('/scan');
+        if (!resp.ok) {
+          addLog(`Scan failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        const devices = data.devices || [];
+        if (!devices.length) {
+          addLog('Scan completed: no Movesense devices found');
+          return;
+        }
+        const first = devices[0];
+        deviceInput.value = first.address;
+        addLog(`Scan completed: found ${devices.length} device(s); first=${first.name || first.address} (${first.address})`);
+      } catch (e) {
+        console.error(e);
+        addLog(`Scan error: ${e}`);
+      }
+    };
+
+    // Connect button: POST /connect with the entered device string
+    connectBtn.onclick = async () => {
+      const device = deviceInput.value.trim();
+      if (!device) {
+        addLog('Connect clicked with empty device; please enter an address or scan first.');
+        return;
+      }
+      addLog(`Connect request for ${device}`);
+      try {
+        const resp = await fetch('/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device })
+        });
+        if (!resp.ok) {
+          addLog(`Connect failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        addLog(data.detail || 'Connect request sent');
+
+        // Save last-used device
+        try {
+          localStorage.setItem('vload_last_device', device);
+        } catch (e) {
+          console.error('localStorage set error', e);
+        }
+      } catch (e) {
+        console.error(e);
+        addLog(`Connect error: ${e}`);
+      }
+    };
+
+    // Disconnect button
+    disconnectBtn.onclick = async () => {
+      addLog('Disconnect button clicked');
+      try {
+        const resp = await fetch('/disconnect', { method: 'POST' });
+        if (!resp.ok) {
+          addLog(`Disconnect failed with status ${resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        addLog(data.detail || 'Disconnect request sent');
+      } catch (e) {
+        console.error(e);
+        addLog(`Disconnect error: ${e}`);
+      }
+    };
+
+    async function refreshVideoStatus() {
+      try {
+        const resp = await fetch('/video/status');
+        if (!resp.ok) return;
+        const st = await resp.json();
+        const cur = { running: !!st.running, has_frame: !!st.has_frame, error: st.error || null };
+        const changed = !_lastVideoState ||
+          cur.running !== _lastVideoState.running ||
+          cur.has_frame !== _lastVideoState.has_frame ||
+          cur.error !== _lastVideoState.error;
+        if (changed) {
+          let text = `Video status: ${cur.running ? 'connected' : 'disconnected'}`;
+          if (cur.running && cur.has_frame) text += ', frames ok';
+          if (cur.error) text += `, error: ${cur.error}`;
+          addLog(text);
+          _lastVideoState = cur;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Session lifecycle is driven by Start/Stop detection; no session polling here.
+
+    // Fetch initial jump config (for settings inputs)
+    async function loadDetectConfig() {
+      try {
+        const resp = await fetch('/config');
+        if (!resp.ok) {
+          addLog('Config load failed with status ' + resp.status);
+          return;
+        }
+        const data = await resp.json();
+        const jc = data.jump || {};
+        if (typeof jc.min_jump_height_m === 'number' && minHeightInput) minHeightInput.value = jc.min_jump_height_m.toFixed(2);
+        if (typeof jc.min_jump_peak_az_no_g === 'number' && minAzInput) minAzInput.value = jc.min_jump_peak_az_no_g.toFixed(1);
+        if (typeof jc.min_jump_peak_gz_deg_s === 'number' && minGzInput) minGzInput.value = jc.min_jump_peak_gz_deg_s.toFixed(0);
+        if (typeof jc.min_new_event_separation_s === 'number' && minSepInput) minSepInput.value = jc.min_new_event_separation_s.toFixed(1);
+        if (typeof jc.min_revs === 'number' && minRevsInput) minRevsInput.value = jc.min_revs.toFixed(1);
+      } catch (e) {
+        console.error(e);
+        addLog('Config load error: ' + e);
+      }
+    }
+
+    if (saveConfigBtn) {
+      saveConfigBtn.onclick = async function () {
+        const payload = {
+          min_jump_height_m: minHeightInput ? parseFloat(minHeightInput.value) : 0,
+          min_jump_peak_az_no_g: minAzInput ? parseFloat(minAzInput.value) : 0,
+          min_jump_peak_gz_deg_s: minGzInput ? parseFloat(minGzInput.value) : 0,
+          min_new_event_separation_s: minSepInput ? parseFloat(minSepInput.value) : 0,
+          min_revs: minRevsInput ? parseFloat(minRevsInput.value) : 0,
+        };
+        addLog('Saving detection settings...');
+        try {
+          const resp = await fetch('/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jump: payload })
+          });
+          if (!resp.ok) {
+            addLog('Config save failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          addLog(data.detail || 'Jump config updated (reconnect to apply)');
+        } catch (e) {
+          console.error(e);
+          addLog('Config save error: ' + e);
+        }
+      };
+    }
+
+    if (startDetectBtn) {
+      startDetectBtn.onclick = async function () {
+        if (detectStatus) detectStatus.textContent = 'Enabling...';
+        addLog('Detection start requested...');
+        try {
+          const resp = await fetch('/detection/start', { method: 'POST' });
+          if (!resp.ok) {
+            if (detectStatus) detectStatus.textContent = 'Error: ' + resp.status;
+            addLog('Detection start failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          if (detectStatus) detectStatus.textContent = data.detail || 'Detection enabled';
+          addLog(data.detail || 'Jump detection enabled');
+        } catch (e) {
+          console.error(e);
+          if (detectStatus) detectStatus.textContent = 'Error';
+          addLog('Detection start error: ' + e);
+        }
+      };
+    }
+
+    if (stopDetectBtn) {
+      stopDetectBtn.onclick = async function () {
+        if (detectStatus) detectStatus.textContent = 'Disabling...';
+        addLog('Detection stop requested...');
+        try {
+          const resp = await fetch('/detection/stop', { method: 'POST' });
+          if (!resp.ok) {
+            if (detectStatus) detectStatus.textContent = 'Error: ' + resp.status;
+            addLog('Detection stop failed with status ' + resp.status);
+            return;
+          }
+          const data = await resp.json();
+          if (detectStatus) detectStatus.textContent = data.detail || 'Detection disabled';
+          addLog(data.detail || 'Jump detection disabled');
+        } catch (e) {
+          console.error(e);
+          if (detectStatus) detectStatus.textContent = 'Error';
+          addLog('Detection stop error: ' + e);
+        }
+      };
+    }
+
+    if (videoConnectBtn) {
+      videoConnectBtn.onclick = async () => {
+        addLog('Video connect requested...');
+        try {
+          const resp = await fetch('/video/connect', { method: 'POST' });
+          if (!resp.ok) {
+            addLog('Video connect failed with status ' + resp.status);
+            return;
+          }
+          await resp.json();
+          addLog('Video streaming started');
+          if (videoFeed) {
+            // Request a conservative MJPEG fps to reduce bandwidth/CPU contention with IMU plotting.
+            videoFeed.src = '/video/mjpeg?fps=10&ts=' + Date.now();
+          }
+          await refreshVideoStatus();
+        } catch (e) {
+          addLog('Video connect error: ' + e);
+        }
+      };
+    }
+
+    if (videoDisconnectBtn) {
+      videoDisconnectBtn.onclick = async () => {
+        addLog('Video disconnect requested...');
+        try {
+          const resp = await fetch('/video/disconnect', { method: 'POST' });
+          if (!resp.ok) {
+            addLog('Video disconnect failed with status ' + resp.status);
+            return;
+          }
+          await resp.json();
+          addLog('Video streaming stopped');
+          if (videoFeed) {
+            videoFeed.removeAttribute('src');
+          }
+          await refreshVideoStatus();
+        } catch (e) {
+          addLog('Video disconnect error: ' + e);
+        }
+      };
+    }
+
+    // Start/Stop Session buttons removed (recording is automatic with detection).
+
+    // Poll status occasionally (useful if camera is unplugged)
+    setInterval(refreshVideoStatus, 1500);
+    refreshVideoStatus();
+
+    // Load detection config on page load
+    loadDetectConfig();
+  </script>
+</body>
+</html>

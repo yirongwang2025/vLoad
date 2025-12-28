@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Callable, Optional, Iterable, Tuple, Dict
+from typing import Callable, Optional, Iterable, Tuple, Dict, Any
 
 from bleak import BleakScanner, BleakClient, BleakError
 
@@ -65,6 +65,15 @@ class MovesenseGATTClient:
 		self._next_ref_id = 1
 		# For multi-part GSP frames (e.g., IMU9 uses DATA + DATA_PART2)
 		self._pending_frames: Dict[int, bytes] = {}
+		# Optional callback invoked when Bleak signals the device disconnected.
+		# Signature varies by backend; we normalize to a no-arg callable for callers.
+		self._on_disconnected: Optional[Callable[[], None]] = None
+
+	def set_disconnected_callback(self, cb: Optional[Callable[[], None]]) -> None:
+		"""
+		Set a callback to be invoked when the BLE link disconnects.
+		"""
+		self._on_disconnected = cb
 
 	@property
 	def is_connected(self) -> bool:
@@ -116,11 +125,25 @@ class MovesenseGATTClient:
 				
 				logging.debug(f"Found device: {device.address if device else 'unknown'} - '{name}'")
 				
-				if name and "movesense" in name.lower():
+				service_uuids = []
+				if adv is not None:
+					try:
+						service_uuids = [str(u).lower() for u in (getattr(adv, 'service_uuids', None) or [])]
+					except Exception:
+						service_uuids = []
+				
+				is_movesense = False
+				if name and 'movesense' in name.lower():
+					is_movesense = True
+				elif service_uuids and GSP_SERVICE_UUID.lower() in service_uuids:
+					is_movesense = True
+				
+				if is_movesense:
 					found_any = True
 					logging.debug(f"  -> Match! Yielding Movesense device")
+					if not name and device is not None:
+						name = f"Movesense ({device.address})"
 					yield device.address, name
-			
 			logging.debug(f"Scanned {device_count} total device(s), found {1 if found_any else 0} Movesense")
 			
 			# If we successfully used return_adv mode and found devices, we're done
@@ -180,7 +203,19 @@ class MovesenseGATTClient:
 						target_address = d.address
 						break
 				if ble_device is None:
-					raise BleakError(f"Device with address {address_or_name} was not found. Ensure it is advertising and nearby.")
+					# As a final fallback, scan for any Movesense device and connect to it.
+					self._log("MAC not found; scanning for any Movesense device as fallback.")
+					found = [item async for item in self.scan_for_movesense(timeout=7.0)]
+					if found:
+						addr, name = found[0]
+						self._log(f"Found Movesense '{name}' at {addr}; connecting to it.")
+						target_address = addr
+						try:
+							ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
+						except Exception:
+							ble_device = None
+					if ble_device is None:
+						raise BleakError(f"Device with address {address_or_name} was not found. Ensure it is advertising and nearby.")
 		else:
 			self._log(f"Scanning for device named '{address_or_name}'...")
 			async for addr, name in self.scan_for_movesense(timeout=7.0):
@@ -195,7 +230,25 @@ class MovesenseGATTClient:
 				raise BleakError(f"Could not find Movesense named '{address_or_name}'.")
 
 		self._log(f"Connecting to Movesense at {target_address} ...")
-		self._client = BleakClient(ble_device or target_address, timeout=connection_timeout)
+
+		# Bleak supports a disconnected_callback on most backends, but the constructor
+		# signature differs across versions. Be defensive.
+		def _disconnected_cb(*_: Any, **__: Any) -> None:
+			try:
+				self._log("BLE disconnected callback fired.")
+			except Exception:
+				pass
+			try:
+				if self._on_disconnected:
+					self._on_disconnected()
+			except Exception:
+				pass
+
+		try:
+			self._client = BleakClient(ble_device or target_address, timeout=connection_timeout, disconnected_callback=_disconnected_cb)
+		except TypeError:
+			# Older Bleak versions may not accept disconnected_callback in ctor.
+			self._client = BleakClient(ble_device or target_address, timeout=connection_timeout)
 		await self._client.__aenter__()
 
 		if not self._client.is_connected:
@@ -323,18 +376,33 @@ class MovesenseGATTClient:
 	# -------------------------------
 	# IMU convenience methods
 	# -------------------------------
-	async def subscribe_imu(self, sample_rate_hz: int = 104, mode: str = "IMU6",
-	                        on_data: Optional[Callable[[bytes], None]] = None) -> Subscription:
+	async def subscribe_imu(
+		self,
+		sample_rate_hz: int = 104,
+		mode: str = "IMU6",
+		on_data: Optional[Callable[[bytes], None]] = None,
+		ref_id: Optional[int] = None,
+	) -> Subscription:
 		"""
 		Convenience wrapper to subscribe to IMU streams.
 		- mode: 'IMU6' (acc+gyro) or 'IMU9' (acc+gyro+mag)
 		- sample_rate_hz: commonly one of 13, 26, 52, 104, 208
+
+		Notes from Movesense official examples:
+		- They use a *fixed* ref_id (e.g. 99 for IMU9) and unsubscribe with the same ref.
+		  Using a fixed ref_id reduces the risk of accidentally having multiple active
+		  subscriptions if unsubscribe fails due to a transient disconnect.
 		"""
 		mode_norm = mode.strip().upper()
 		if mode_norm not in ("IMU6", "IMU9"):
 			raise ValueError("mode must be 'IMU6' or 'IMU9'")
-		resource = f"Meas/{mode_norm}/{sample_rate_hz}"
-		return await self.subscribe(resource_path=resource, on_data=(on_data or self._default_imu_print))
+		# Movesense official examples send a leading slash in the URI.
+		resource = f"/Meas/{mode_norm}/{sample_rate_hz}"
+		return await self.subscribe(
+			resource_path=resource,
+			on_data=(on_data or self._default_imu_print),
+			ref_id=ref_id,
+		)
 
 	def _default_imu_print(self, payload: bytes) -> None:
 		"""
@@ -362,9 +430,7 @@ class MovesenseGATTClient:
 		Conservative framing (keeps compatibility with known public examples):
 		    [OPCODE_SUBSCRIBE:1][REF:1][URI:ascii...]
 		"""
-		if resource_path.startswith("/"):
-			# GSP examples typically omit leading slash; be permissive and strip it
-			resource_path = resource_path.lstrip("/")
+		# Keep leading slash if present; Movesense official examples include it.
 		uri_bytes = resource_path.encode("utf-8")
 		return bytes([OPCODE_SUBSCRIBE & 0xFF, ref & 0xFF]) + uri_bytes
 

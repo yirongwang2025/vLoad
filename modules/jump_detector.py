@@ -73,6 +73,9 @@ class JumpDetectorRealtime:
 		self.min_jump_peak_az_no_g: float = 3.5
 		self.min_jump_peak_gz_deg_s: float = 180.0
 		self.min_new_event_separation_s: float = 0.5
+		# Step 2.3: only treat events with at least this many revolutions as real jumps.
+		# Uses revolutions_est computed in compute_window_metrics (Step 2.2).
+		self.min_revs: float = 0.0
 		self._last_emitted_peak_t: float = 0.0
 
 		# Optional overrides from config dict.
@@ -108,7 +111,9 @@ class JumpDetectorRealtime:
 
 			# Emit a one‑time log line once we have at least ~1 second of data
 			if not self._phase1_logged and len(self._buffer) >= int(self.sample_rate_hz):
-				stats = preprocess_vertical_series(list(self._buffer))
+				# Use list() only once - buffer is deque, need list for preprocessing
+				buffer_list = list(self._buffer)
+				stats = preprocess_vertical_series(buffer_list)
 				msg = (
 					f"[Phase1] Vertical tracking active over ~{stats['duration']:.2f} s: "
 					f"max|az|={stats['max_abs_az']:.2f} m/s², "
@@ -121,84 +126,35 @@ class JumpDetectorRealtime:
 			# Phase 2.1: once the window is reasonably full, log a brief
 			# preprocessing confirmation using the same helper. This is kept
 			# to a single message per connection to avoid log spam.
-			if (
-				not self._phase2_1_logged
-				and len(self._buffer) >= int(self.sample_rate_hz * self.window_seconds * 0.9)
-			):
-				stats = preprocess_vertical_series(list(self._buffer))
-				msg = (
-					f"[Phase2.1] Preprocess buffer: {stats['count']} samples over "
-					f"~{stats['duration']:.2f} s, "
-					f"max|az-g|={stats['max_abs_az_no_g']:.2f} m/s², "
-					f"max|gz|={stats['max_abs_gz']:.1f} °/s"
-				)
-				self.logger(msg)
-				self._phase2_1_logged = True
+			# if (
+			# 	not self._phase2_1_logged
+			# 	and len(self._buffer) >= int(self.sample_rate_hz * self.window_seconds * 0.9)
+			# ):
+				# Phase 2.1 diagnostic logging removed per user request.
+				# self._phase2_1_logged = True
 
 			# Phase 2.2: periodically (about once per second) count the number
 			# of vertical peaks in the current buffer using a simple, SciPy‑
 			# free peak finder. This is still diagnostic only; no jumps yet.
 			now_wall = time.time()
-			if self._phase2_1_logged and now_wall - self._last_phase2_2_log_t >= 1.0:
-				stats = preprocess_vertical_series(list(self._buffer))
-				min_dist_samples = max(
-					1, int(self.min_peak_distance_s * self.sample_rate_hz)
-				)
-				peak_indices = find_vertical_peaks(
-					stats,
-					min_height=self.min_peak_height_m_s2,
-					min_distance_samples=min_dist_samples,
-				)
-				msg = (
-					f"[Phase2.2] Peaks in ~{stats['duration']:.2f} s window: "
-					f"{len(peak_indices)} (min_height={self.min_peak_height_m_s2:.1f} m/s², "
-					f"min_spacing={self.min_peak_distance_s:.2f} s)"
-				)
-				self.logger(msg)
-				self._last_phase2_2_log_t = now_wall
+			# if self._phase2_1_logged and now_wall - self._last_phase2_2_log_t >= 1.0:
+				# Phase 2.2 diagnostic logging removed per user request.
+				# self._last_phase2_2_log_t = now_wall
 
-			# Phase 2.3: at a slower cadence (~every 2 seconds), build simple
-			# candidate jump windows from the peak indices and log their
-			# flight times. This still does not emit "real" jumps; it is
-			# purely diagnostic.
-			if self._phase2_1_logged and now_wall - self._last_phase2_3_log_t >= 2.0:
-				stats = preprocess_vertical_series(list(self._buffer))
-				min_dist_samples = max(
-					1, int(self.min_peak_distance_s * self.sample_rate_hz)
-				)
-				peak_indices = find_vertical_peaks(
-					stats,
-					min_height=self.min_peak_height_m_s2,
-					min_distance_samples=min_dist_samples,
-				)
-				windows = build_jump_windows(
-					stats,
-					peak_indices,
-					min_flight_time_s=self.min_flight_time_s,
-					max_flight_time_s=self.max_flight_time_s,
-				)
-				if windows:
-					flight_times = ", ".join(
-						f"{w['flight_time']:.3f}" for w in windows[:5]
-					)
-				else:
-					flight_times = ""
-				msg = (
-					f"[Phase2.3] Candidate windows in ~{stats['duration']:.2f} s: "
-					f"{len(windows)}"
-				)
-				if flight_times:
-					msg += f" (T_f: {flight_times} s{' ...' if len(windows) > 5 else ''})"
-				self.logger(msg)
-				self._last_phase2_3_log_t = now_wall
+			# Phase 2.3: at a slower cadence (~every 2 seconds), update tracking timestamp.
+			# (Diagnostic logging removed per user request.)
+			#if self._phase2_1_logged and now_wall - self._last_phase2_3_log_t >= 2.0:
+				# self._last_phase2_3_log_t = now_wall
 
 			# Phase 2.4 & 2.5: every few seconds, derive simple jump metrics
 			# (height and peak rotation speed) for the current candidate
-			# windows, log a compact summary, and then filter/score into
-			# higher-confidence jump events.
+			# windows, and then filter/score into higher-confidence jump events.
+			# (Phase 2.4 diagnostic logging removed per user request.)
 			new_events: List[Dict[str, Any]] = []
-			if self._phase2_1_logged and now_wall - self._last_phase2_4_log_t >= 3.0:
-				stats = preprocess_vertical_series(list(self._buffer))
+			if now_wall - self._last_phase2_4_log_t >= 3.0:
+				# Convert deque to list only once per analysis cycle
+				buffer_list = list(self._buffer)
+				stats = preprocess_vertical_series(buffer_list)
 				min_dist_samples = max(
 					1, int(self.min_peak_distance_s * self.sample_rate_hz)
 				)
@@ -214,24 +170,11 @@ class JumpDetectorRealtime:
 					max_flight_time_s=self.max_flight_time_s,
 				)
 				metrics = compute_window_metrics(stats, windows)
-				if metrics:
-					parts = []
-					for m in metrics[:3]:
-						parts.append(
-							f"T_f={m['flight_time']:.3f}s,"
-							f"h={m['height']:.3f}m,"
-							f"ωz={m['peak_gz']:.0f}°/s"
-						)
-					joined = " | ".join(parts)
-					if len(metrics) > 3:
-						joined += " ..."
-					msg = f"[Phase2.4] Jump metrics: {joined}"
-				else:
-					msg = "[Phase2.4] Jump metrics: none in current window"
-				self.logger(msg)
+				# Phase 2.4 diagnostic logging removed per user request.
 				self._last_phase2_4_log_t = now_wall
 
 				# Phase 2.5 – select higher-confidence jump events.
+				# Note: select_jump_events already enforces min_separation_s internally
 				candidates = select_jump_events(
 					metrics,
 					min_height_m=self.min_jump_height_m,
@@ -239,6 +182,18 @@ class JumpDetectorRealtime:
 					min_peak_gz_deg_s=self.min_jump_peak_gz_deg_s,
 					min_separation_s=self.min_new_event_separation_s,
 				)
+				# Step 2.3: filter by minimum revolutions (if available).
+				if self.min_revs and self.min_revs > 0.0:
+					filtered: List[Dict[str, Any]] = []
+					for ev in candidates:
+						try:
+							rev_est = float(ev.get("revolutions_est", 0.0))
+						except (TypeError, ValueError):
+							rev_est = 0.0
+						if rev_est >= float(self.min_revs):
+							filtered.append(ev)
+					candidates = filtered
+				# Filter by last emitted time (additional debouncing across buffer updates)
 				for ev in candidates:
 					t_peak = float(ev.get("t_peak", 0.0))
 					if (
@@ -249,15 +204,22 @@ class JumpDetectorRealtime:
 						self._last_emitted_peak_t = t_peak
 
 				for ev in new_events:
+					# Optional Step 2.2 fields
+					rev_est = ev.get("revolutions_est", None)
+					underrot = ev.get("underrotation", None)
+					rev_str = ""
+					if isinstance(rev_est, (int, float)) and isinstance(underrot, (int, float)):
+						rev_str = ", rev≈{:.2f}, UR={:.2f}".format(float(rev_est), float(underrot))
 					self.logger(
-						"[Jump] t_peak={:.3f}, T_f={:.3f}s, h={:.3f}m, "
-						"ωz_peak={:.0f}°/s, phase={:.2f}, conf={:.2f}".format(
+						("[Jump] t_peak={:.3f}, T_f={:.3f}s, h={:.3f}m, "
+						 "ωz_peak={:.0f}°/s, phase={:.2f}, conf={:.2f}{}").format(
 							ev.get("t_peak", 0.0),
 							ev.get("flight_time", 0.0),
 							ev.get("height", 0.0),
 							ev.get("peak_gz", 0.0),
 							ev.get("rotation_phase", 0.0),
 							ev.get("confidence", 0.0),
+							rev_str,
 						)
 					)
 
@@ -267,5 +229,3 @@ class JumpDetectorRealtime:
 
 		# Phase 2.5: return any new jump events detected in this call.
 		return new_events
-
-
