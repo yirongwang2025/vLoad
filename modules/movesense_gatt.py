@@ -57,12 +57,18 @@ class MovesenseGATTClient:
 	    await client.disconnect()
 	"""
 
-	def __init__(self, logger: Callable[[str], None] = _default_logger):
+	def __init__(
+		self,
+		logger: Callable[[str], None] = _default_logger,
+		adapter: Optional[str] = None,
+	):
 		self._client: Optional[BleakClient] = None
 		self._log = logger
 		self._notify_handler_set = False
 		self._user_data_callback: Optional[Callable[[bytes], None]] = None
 		self._next_ref_id = 1
+		# Optional BlueZ adapter name (Linux), e.g. "hci0" / "hci1".
+		self._adapter: Optional[str] = (adapter or "").strip() or None
 		# For multi-part GSP frames (e.g., IMU9 uses DATA + DATA_PART2)
 		self._pending_frames: Dict[int, bytes] = {}
 		# Optional callback invoked when Bleak signals the device disconnected.
@@ -176,6 +182,80 @@ class MovesenseGATTClient:
 				logging.debug(f"  -> Match! Yielding Movesense device")
 				yield d.address, (name or d.address)
 
+	async def scan_for_movesense_on_adapter(self, timeout: float = 5.0) -> Iterable[Tuple[str, str]]:
+		"""
+		Same as scan_for_movesense(), but attempts to scope scanning to a specific
+		BlueZ adapter (Linux) if self._adapter is set.
+
+		This method is defensive across Bleak versions; if the backend doesn't
+		accept adapter scoping, it falls back to a normal scan.
+		"""
+		if not self._adapter:
+			async for item in self.scan_for_movesense(timeout=timeout):
+				yield item
+			return
+
+		found_any = False
+		try:
+			# Bleak >= 0.22 supports adapter selection on Linux via kwarg on discover().
+			results = await BleakScanner.discover(timeout=timeout, return_adv=True, adapter=self._adapter)  # type: ignore[call-arg]
+			iterable = results.items() if isinstance(results, dict) else results
+			for item in iterable:
+				device = None
+				adv = None
+				if isinstance(item, tuple):
+					if len(item) >= 2:
+						device, adv = item[0], item[1]
+					elif len(item) == 1:
+						device = item[0]
+				else:
+					device = item
+
+				name = ""
+				if adv is not None:
+					name = getattr(adv, "local_name", None) or ""
+				if not name and device is not None:
+					name = getattr(device, "name", "") or ""
+
+				service_uuids = []
+				if adv is not None:
+					try:
+						service_uuids = [str(u).lower() for u in (getattr(adv, "service_uuids", None) or [])]
+					except Exception:
+						service_uuids = []
+
+				is_movesense = False
+				if name and "movesense" in name.lower():
+					is_movesense = True
+				elif service_uuids and GSP_SERVICE_UUID.lower() in service_uuids:
+					is_movesense = True
+
+				if is_movesense and device is not None:
+					found_any = True
+					yield device.address, (name or f"Movesense ({device.address})")
+			if found_any:
+				return
+		except TypeError:
+			# Either return_adv or adapter isn't supported by this Bleak version/back-end.
+			pass
+		except Exception:
+			pass
+
+		# Fallback: basic discover (try adapter scoping if supported; else plain).
+		try:
+			devices = await BleakScanner.discover(timeout=timeout, adapter=self._adapter)  # type: ignore[call-arg]
+		except TypeError:
+			devices = await BleakScanner.discover(timeout=timeout)
+
+		for d in devices:
+			name = getattr(d, "name", "") or ""
+			if not name:
+				md = getattr(d, "metadata", None)
+				if isinstance(md, dict):
+					name = md.get("local_name", "") or ""
+			if "movesense" in name.lower():
+				yield d.address, (name or d.address)
+
 	async def connect(self, address_or_name: str, connection_timeout: float = 20.0) -> None:
 		"""
 		Connect to a Movesense device by MAC address or by name.
@@ -190,12 +270,22 @@ class MovesenseGATTClient:
 			# Resolve MAC by scanning to populate BlueZ cache
 			self._log(f"Attempting MAC-based connect to '{address_or_name}'...")
 			try:
-				ble_device = await BleakScanner.find_device_by_address(address_or_name, timeout=10.0)
+				if self._adapter:
+					ble_device = await BleakScanner.find_device_by_address(address_or_name, timeout=10.0, adapter=self._adapter)  # type: ignore[call-arg]
+				else:
+					ble_device = await BleakScanner.find_device_by_address(address_or_name, timeout=10.0)
 			except Exception:
 				ble_device = None
 			if ble_device is None:
 				self._log("Direct find_device_by_address failed; falling back to discovery scan.")
-				devices = await BleakScanner.discover(timeout=7.0)
+				try:
+					if self._adapter:
+						devices = await BleakScanner.discover(timeout=7.0, adapter=self._adapter)  # type: ignore[call-arg]
+					else:
+						devices = await BleakScanner.discover(timeout=7.0)
+				except TypeError:
+					# Bleak backend doesn't accept adapter kwarg
+					devices = await BleakScanner.discover(timeout=7.0)
 				for d in devices:
 					if d.address.replace("-", ":").lower() == address_or_name.lower():
 						self._log(f"Matched address via discovery: {d.address}")
@@ -205,24 +295,30 @@ class MovesenseGATTClient:
 				if ble_device is None:
 					# As a final fallback, scan for any Movesense device and connect to it.
 					self._log("MAC not found; scanning for any Movesense device as fallback.")
-					found = [item async for item in self.scan_for_movesense(timeout=7.0)]
+					found = [item async for item in self.scan_for_movesense_on_adapter(timeout=7.0)]
 					if found:
 						addr, name = found[0]
 						self._log(f"Found Movesense '{name}' at {addr}; connecting to it.")
 						target_address = addr
 						try:
-							ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
+							if self._adapter:
+								ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0, adapter=self._adapter)  # type: ignore[call-arg]
+							else:
+								ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
 						except Exception:
 							ble_device = None
 					if ble_device is None:
 						raise BleakError(f"Device with address {address_or_name} was not found. Ensure it is advertising and nearby.")
 		else:
 			self._log(f"Scanning for device named '{address_or_name}'...")
-			async for addr, name in self.scan_for_movesense(timeout=7.0):
+			async for addr, name in self.scan_for_movesense_on_adapter(timeout=7.0):
 				if name.strip().lower() == address_or_name.strip().lower():
 					target_address = addr
 					try:
-						ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
+						if self._adapter:
+							ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0, adapter=self._adapter)  # type: ignore[call-arg]
+						else:
+							ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
 					except Exception:
 						ble_device = None
 					break
@@ -244,11 +340,31 @@ class MovesenseGATTClient:
 			except Exception:
 				pass
 
+		# Construct BleakClient defensively across versions (disconnected_callback/adapter may not exist).
+		ctor_target = (ble_device or target_address)
 		try:
-			self._client = BleakClient(ble_device or target_address, timeout=connection_timeout, disconnected_callback=_disconnected_cb)
+			if self._adapter:
+				self._client = BleakClient(
+					ctor_target,
+					timeout=connection_timeout,
+					disconnected_callback=_disconnected_cb,
+					adapter=self._adapter,  # type: ignore[call-arg]
+				)
+			else:
+				self._client = BleakClient(
+					ctor_target,
+					timeout=connection_timeout,
+					disconnected_callback=_disconnected_cb,
+				)
 		except TypeError:
-			# Older Bleak versions may not accept disconnected_callback in ctor.
-			self._client = BleakClient(ble_device or target_address, timeout=connection_timeout)
+			# Older Bleak versions may not accept disconnected_callback and/or adapter.
+			try:
+				if self._adapter:
+					self._client = BleakClient(ctor_target, timeout=connection_timeout, adapter=self._adapter)  # type: ignore[call-arg]
+				else:
+					self._client = BleakClient(ctor_target, timeout=connection_timeout)
+			except TypeError:
+				self._client = BleakClient(ctor_target, timeout=connection_timeout)
 		await self._client.__aenter__()
 
 		if not self._client.is_connected:

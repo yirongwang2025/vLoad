@@ -1,10 +1,27 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
+# Python
+venv/
+.venv/
 __pycache__/
-venv
-*.pdf
-pyvenv.cfg
-modules/__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Config and data (often local)
+config.json
+data/
+*.db
+.cursor/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*~
+
+# Optional
+Papers/
+RECORDING_SYSTEM_ANALYSIS.md
 deploy.sh
-data/*
-Papers/*
-extract_papers.py

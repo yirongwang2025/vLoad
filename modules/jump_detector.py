@@ -76,7 +76,12 @@ class JumpDetectorRealtime:
 		# Step 2.3: only treat events with at least this many revolutions as real jumps.
 		# Uses revolutions_est computed in compute_window_metrics (Step 2.2).
 		self.min_revs: float = 0.0
+		# How often (in sample-time seconds) to run the heavier window+metrics+event selection.
+		# Lower values reduce detection latency but increase CPU. 0.5s is a good default for live use.
+		self.analysis_interval_s: float = 0.5
 		self._last_emitted_peak_t: float = 0.0
+		# Persistent tracking of last takeoff time across analysis cycles for separation enforcement
+		self._last_t_takeoff_persistent: float = -1e9
 
 		# Optional overrides from config dict.
 		if config:
@@ -136,7 +141,9 @@ class JumpDetectorRealtime:
 			# Phase 2.2: periodically (about once per second) count the number
 			# of vertical peaks in the current buffer using a simple, SciPy‑
 			# free peak finder. This is still diagnostic only; no jumps yet.
-			now_wall = time.time()
+			# Use sample-time for cadence decisions so backlog / timestamp alignment doesn't
+			# accidentally change the analysis frequency.
+			now_wall = t
 			# if self._phase2_1_logged and now_wall - self._last_phase2_2_log_t >= 1.0:
 				# Phase 2.2 diagnostic logging removed per user request.
 				# self._last_phase2_2_log_t = now_wall
@@ -151,7 +158,7 @@ class JumpDetectorRealtime:
 			# windows, and then filter/score into higher-confidence jump events.
 			# (Phase 2.4 diagnostic logging removed per user request.)
 			new_events: List[Dict[str, Any]] = []
-			if now_wall - self._last_phase2_4_log_t >= 3.0:
+			if now_wall - self._last_phase2_4_log_t >= float(self.analysis_interval_s):
 				# Convert deque to list only once per analysis cycle
 				buffer_list = list(self._buffer)
 				stats = preprocess_vertical_series(buffer_list)
@@ -174,14 +181,17 @@ class JumpDetectorRealtime:
 				self._last_phase2_4_log_t = now_wall
 
 				# Phase 2.5 – select higher-confidence jump events.
-				# Note: select_jump_events already enforces min_separation_s internally
-				candidates = select_jump_events(
+				# Pass persistent last_t_takeoff to enforce separation across analysis cycles
+				candidates, updated_last_t_takeoff = select_jump_events(
 					metrics,
 					min_height_m=self.min_jump_height_m,
 					min_peak_az_no_g=self.min_jump_peak_az_no_g,
 					min_peak_gz_deg_s=self.min_jump_peak_gz_deg_s,
 					min_separation_s=self.min_new_event_separation_s,
+					last_t_takeoff_persistent=self._last_t_takeoff_persistent,
 				)
+				# Update persistent tracking for next analysis cycle
+				self._last_t_takeoff_persistent = updated_last_t_takeoff
 				# Step 2.3: filter by minimum revolutions (if available).
 				if self.min_revs and self.min_revs > 0.0:
 					filtered: List[Dict[str, Any]] = []
@@ -193,15 +203,18 @@ class JumpDetectorRealtime:
 						if rev_est >= float(self.min_revs):
 							filtered.append(ev)
 					candidates = filtered
-				# Filter by last emitted time (additional debouncing across buffer updates)
+				# Additional debouncing: filter by last emitted takeoff time (consistent with select_jump_events).
+				# This prevents duplicate emissions across overlapping analysis cycles.
 				for ev in candidates:
-					t_peak = float(ev.get("t_peak", 0.0))
+					t_takeoff = float(ev.get("t_takeoff", ev.get("t_peak", 0.0)))
+					# Use takeoff time for consistency with select_jump_events separation logic
 					if (
-						t_peak - self._last_emitted_peak_t
+						t_takeoff - self._last_emitted_peak_t
 						>= self.min_new_event_separation_s
 					):
 						new_events.append(ev)
-						self._last_emitted_peak_t = t_peak
+						# Update to takeoff time (not t_peak) for consistent separation tracking
+						self._last_emitted_peak_t = t_takeoff
 
 				for ev in new_events:
 					# Optional Step 2.2 fields

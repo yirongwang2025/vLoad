@@ -7,7 +7,7 @@ import socket
 import sys
 import time
 from collections import deque
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from modules.movesense_gatt import MovesenseGATTClient
 
@@ -97,28 +97,47 @@ async def _run_collector(
 	connected_addr: Optional[str] = None
 
 	# Buffer for raw notifications; processing happens on this process's loop.
-	payload_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=600)
+	# IMPORTANT: timestamp in the BLE callback thread so IMU times are not skewed by
+	# collector processing backlog (which can be seconds under video load).
+	payload_q: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=600)
 	last_notify_mono = time.monotonic()
 
 	def on_data(payload: bytes) -> None:
 		# Keep callback minimal; Bleak may invoke from another thread.
 		nonlocal last_notify_mono
 		last_notify_mono = time.monotonic()
+		t_cb = time.time()
 		# Bleak may invoke this on a non-async thread. We capture the main loop once.
 		try:
-			main_loop.call_soon_threadsafe(payload_q.put_nowait, payload)
+			main_loop.call_soon_threadsafe(payload_q.put_nowait, (t_cb, payload))
 		except Exception:
 			# Drop if queue is full or loop is closing.
 			pass
 
 	# Per-sample timestamping state
 	last_sample_t = 0.0
+	# Device timestamp (ms) -> epoch seconds mapping:
+	#   epoch_s ≈ device_ms/1000 + offset_s
+	#
+	# Proposed approach: compute a fixed offset once at connect time by averaging
+	# ~1s of packets, then reuse it for the rest of the connection. This reduces
+	# jitter from per-packet BLE scheduling and avoids "backlog skew" entirely.
+	CALIB_WARMUP_S: float = 1.0
+	CALIB_MIN_SAMPLES: int = 6
+	_offset_fixed_s: Optional[float] = None
+	_offset_samples: list[float] = []
+	_calib_start_mono: Optional[float] = None
+	# If we haven't finished calibration yet, we fall back to a lightweight EMA.
+	offset_ema_s: Optional[float] = None
+	offset_alpha: float = 0.02
 
 	async def process_payloads() -> None:
 		nonlocal last_sample_t
+		nonlocal offset_ema_s
+		nonlocal _offset_fixed_s, _offset_samples, _calib_start_mono
 		last_stat_mono = time.monotonic()
 		while True:
-			payload = await payload_q.get()
+			t_cb, payload = await payload_q.get()
 			try:
 				decoded = client.decode_imu_payload(payload, mode)  # type: ignore[attr-defined]
 				samples = decoded.get("samples", []) or []
@@ -127,14 +146,61 @@ async def _run_collector(
 				if not samples:
 					continue
 
-				now_frame_t = time.time()
 				n = len(samples)
 				dt = 1.0 / float(rate) if rate and rate > 0 else 1.0 / 104.0
+				dt_ms = dt * 1000.0
+
+				# Prefer device timestamp (ms) if available; it's more accurate for intra-packet timing.
+				use_device_ts = isinstance(frame_ts, (int, float)) and float(frame_ts) > 0
+
+				# Determine an epoch anchor for this packet:
+				# - If we have device timestamp: align the LAST sample time to callback receipt time.
+				# - Else: fall back to callback time as the end-of-packet timestamp.
+				now_frame_t = float(t_cb)
+				frame_ts_ms = float(frame_ts) if use_device_ts else None
+				if frame_ts_ms is not None:
+					# Device timestamp for the last sample in this packet:
+					device_last_s = (frame_ts_ms + float(max(0, n - 1)) * dt_ms) / 1000.0
+					offset_inst = now_frame_t - device_last_s
+					# Start calibration window on first device-timestamped packet.
+					if _calib_start_mono is None:
+						_calib_start_mono = time.monotonic()
+					# If we don't have a fixed offset yet, collect samples during warmup.
+					if _offset_fixed_s is None and _calib_start_mono is not None:
+						try:
+							if (time.monotonic() - _calib_start_mono) <= CALIB_WARMUP_S:
+								_offset_samples.append(float(offset_inst))
+							else:
+								# Finalize: use median for robustness to BLE jitter spikes.
+								if len(_offset_samples) >= CALIB_MIN_SAMPLES:
+									s = sorted(_offset_samples)
+									_offset_fixed_s = float(s[len(s) // 2])
+								else:
+									# Not enough samples; fall back to EMA.
+									_offset_fixed_s = None
+						except Exception:
+							pass
+					# Maintain an EMA until fixed offset is established (and also as a debug signal).
+					if offset_ema_s is None:
+						offset_ema_s = float(offset_inst)
+					else:
+						offset_ema_s = float(offset_ema_s) * (1.0 - offset_alpha) + float(offset_inst) * offset_alpha
 
 				out_samples = []
 				for i, s in enumerate(samples):
-					# Distribute timestamps across the packet, end at now_frame_t, enforce monotonicity.
-					t_i = now_frame_t - float((n - 1 - i)) * dt
+					# Compute per-sample epoch time.
+					# - If device timestamp is present: use calibrated mapping device_ms -> epoch_s.
+					# - Else: distribute timestamps across the packet ending at now_frame_t.
+					if frame_ts_ms is not None and (_offset_fixed_s is not None or offset_ema_s is not None):
+						device_ms = frame_ts_ms + float(i) * dt_ms
+						device_ts_s = device_ms / 1000.0
+						offset_use = _offset_fixed_s if _offset_fixed_s is not None else offset_ema_s
+						t_i = float(device_ts_s) + float(offset_use)
+					else:
+						t_i = now_frame_t - float((n - 1 - i)) * dt
+						device_ts_s = None
+
+					# Enforce monotonicity (protect downstream jump detector).
 					if t_i <= last_sample_t:
 						t_i = last_sample_t + dt
 					last_sample_t = t_i
@@ -146,6 +212,8 @@ async def _run_collector(
 							"mag": s.get("mag", []),
 							"imu_timestamp": frame_ts,
 							"imu_sample_index": i,
+							# Optional: device timestamp in seconds (non-epoch; "since boot" timebase)
+							"device_ts": device_ts_s,
 						}
 					)
 
@@ -158,6 +226,10 @@ async def _run_collector(
 						"timestamp": frame_ts,
 						"samples": out_samples,
 						"t_host": now_frame_t,
+						# Debug: current best estimate(s) of epoch offset for device timestamp mapping.
+						"imu_clock_offset_s": (_offset_fixed_s if _offset_fixed_s is not None else offset_ema_s),
+						"imu_clock_offset_fixed": bool(_offset_fixed_s is not None),
+						"imu_clock_offset_calib_n": int(len(_offset_samples)),
 					}
 				)
 

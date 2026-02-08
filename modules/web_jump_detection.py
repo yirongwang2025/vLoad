@@ -560,7 +560,8 @@ def select_jump_events(
 	min_peak_az_no_g: float,
 	min_peak_gz_deg_s: float,
 	min_separation_s: float,
-) -> List[Dict[str, float]]:
+	last_t_takeoff_persistent: Optional[float] = None,
+) -> Tuple[List[Dict[str, float]], float]:
 	"""
 	Phase 2.5 – filter and score enriched windows into jump events.
 
@@ -573,9 +574,13 @@ def select_jump_events(
 	  - Normalize height, peak_az_no_g and peak_gz against nominal
 	    "good jump" scales and combine with a simple rotation‑phase term.
 	  - Very low‑confidence events (< ~0.35) are discarded.
+
+	Returns:
+	  - Tuple of (selected_events, updated_last_t_takeoff)
+	  - updated_last_t_takeoff can be used to persist separation tracking across analysis cycles
 	"""
 	if not windows_with_metrics:
-		return []
+		return ([], last_t_takeoff_persistent if last_t_takeoff_persistent is not None else -1e9)
 
 	# Filter by hard thresholds.
 	candidates: List[Dict[str, float]] = []
@@ -588,13 +593,16 @@ def select_jump_events(
 		candidates.append(w)
 
 	if not candidates:
-		return []
+		return ([], last_t_takeoff_persistent if last_t_takeoff_persistent is not None else -1e9)
 
 	# Sort by takeoff time.
 	candidates.sort(key=lambda x: float(x.get("t_takeoff", 0.0)))
 
 	selected: List[Dict[str, float]] = []
-	last_t_peak: float = -1e9
+	# Use takeoff-to-takeoff separation (per Bruening et al. 2018), not rotation peak time.
+	# This prevents adjacent jumps from being emitted when rotation peaks are close.
+	# Initialize with persistent value if provided, otherwise start fresh for this batch.
+	last_t_takeoff: float = last_t_takeoff_persistent if last_t_takeoff_persistent is not None else -1e9
 	min_sep = max(0.0, float(min_separation_s))
 
 	for w in candidates:
@@ -602,9 +610,12 @@ def select_jump_events(
 		h = float(w.get("height", 0.0))
 		a = float(w.get("peak_az_no_g", 0.0))
 		g = float(w.get("peak_gz", 0.0))
-		t_peak = float(w.get("t_peak_gz", w.get("t_takeoff", 0.0)))
+		t_takeoff = float(w.get("t_takeoff", 0.0))
+		t_landing = float(w.get("t_landing", t_takeoff + T_f))
+		t_peak = float(w.get("t_peak_gz", t_takeoff))
 
-		if t_peak - last_t_peak < min_sep:
+		# Separation check: use takeoff time (per Bruening paper methodology)
+		if t_takeoff - last_t_takeoff < min_sep:
 			continue
 
 		# Compute a confidence score based on rough nominal scales and
@@ -628,14 +639,43 @@ def select_jump_events(
 		if conf < 0.35:
 			continue
 
+		# Overlap-based suppression: if this jump overlaps with a previously selected jump,
+		# keep only the one with higher confidence (prevents double-counting from landing spikes).
+		overlaps_with = None
+		for i, sel in enumerate(selected):
+			sel_takeoff = float(sel.get("t_takeoff", 0.0))
+			sel_landing = float(sel.get("t_landing", sel_takeoff + float(sel.get("flight_time", 0.0))))
+			# Check if windows overlap (with small tolerance for edge cases)
+			if not (t_landing < sel_takeoff - 0.1 or t_takeoff > sel_landing + 0.1):
+				overlaps_with = i
+				break
+
+		if overlaps_with is not None:
+			# Found overlap: compare confidence and keep the higher one
+			sel = selected[overlaps_with]
+			sel_conf = float(sel.get("confidence", 0.0))
+			if conf > sel_conf:
+				# Replace lower-confidence jump with this one
+				event = dict(w)
+				event["confidence"] = float(conf)
+				event["t_peak"] = t_peak
+				event["rotation_phase"] = float(phase)
+				selected[overlaps_with] = event
+				# Update last_t_takeoff if this jump is later
+				if t_takeoff > last_t_takeoff:
+					last_t_takeoff = t_takeoff
+			# else: keep existing higher-confidence jump, skip this one
+			continue
+
 		event = dict(w)
 		event["confidence"] = float(conf)
 		event["t_peak"] = t_peak
 		event["rotation_phase"] = float(phase)
 
 		selected.append(event)
-		last_t_peak = t_peak
+		last_t_takeoff = t_takeoff
 
-	return selected
+	# Return both selected events and the updated last_t_takeoff for persistence
+	return (selected, last_t_takeoff)
 
 

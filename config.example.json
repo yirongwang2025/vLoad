@@ -1,0 +1,48 @@
+{
+  "database": {
+    "url": "postgresql://vload_user:YOUR_PASSWORD@localhost:5432/vload"
+  },
+  "movesense": {
+    "default_device": "",
+    "default_mode": "IMU9",
+    "default_rate": 104,
+    "ble_adapter": ""
+  },
+  "imu_udp": {
+    "host": "127.0.0.1",
+    "port": 9999
+  },
+  "jobs": {
+    "jump_clip_jobs_dir": "data/jobs/jump_clips"
+  },
+  "sessions": {
+    "base_dir": "data/sessions",
+    "jump_clips_subdir": "jump_clips"
+  },
+  "jump_recording": {
+    "pre_jump_seconds": 2.0,
+    "post_jump_seconds": 3.0,
+    "clip_buffer_seconds": 0.8
+  },
+  "video": {
+    "backend": "picamera2",
+    "process": {
+      "enabled": false,
+      "collector_host": "127.0.0.1",
+      "collector_port": 18081
+    },
+    "picamera2": {
+      "primary_index": 0,
+      "module3": {
+        "record_size": [1920, 1080],
+        "preview_size": [960, 540],
+        "preview_fps": 15,
+        "bitrate": 10000000,
+        "controls": {}
+      },
+      "gs_index": -1
+    }
+  }
+}
+
+

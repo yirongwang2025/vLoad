@@ -4,13 +4,14 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from modules import db
+from modules.config import get_config
+from modules.video_backend import get_video_backend_for_tools
+from modules.video_tools import cut_h264_clip_to_mp4_best_effort, extract_mp4_frame_times, probe_mp4_stream_info
 
 
 def _safe_read_json(path: Path) -> Dict[str, Any]:
@@ -23,6 +24,22 @@ def _safe_read_json(path: Path) -> Dict[str, Any]:
 def _write_text(path: Path, text: str) -> None:
 	path.parent.mkdir(parents=True, exist_ok=True)
 	path.write_text(text, encoding="utf-8")
+
+
+def _read_session_t_start(session_dir: Path) -> Optional[float]:
+	"""
+	Read session start time (epoch seconds) from session.json.
+	This is used to convert host-time windows into video-time offsets without needing frames.csv.
+	"""
+	try:
+		p = session_dir / "session.json"
+		if not p.exists():
+			return None
+		data = json.loads(p.read_text(encoding="utf-8"))
+		t0 = data.get("t_start")
+		return float(t0) if isinstance(t0, (int, float, str)) else None
+	except Exception:
+		return None
 
 
 async def _wait_for_file(path: Path, timeout_s: float) -> bool:
@@ -45,6 +62,7 @@ async def _process_job(job: Dict[str, Any]) -> str:
 	- video_fps: int (optional, default 30)
 	"""
 	jump_id = int(job.get("jump_id") or 0)
+	event_id = int(job.get("event_id") or 0)
 	session_id = str(job.get("session_id") or "").strip()
 	if jump_id <= 0 or not session_id:
 		return "invalid job (missing jump_id/session_id)"
@@ -53,136 +71,112 @@ async def _process_job(job: Dict[str, Any]) -> str:
 	clip_end_host = float(job.get("clip_end_host"))
 	video_fps = int(job.get("video_fps") or 30)
 
-	base = Path("data") / "sessions" / session_id
+	CFG = get_config()
+	sessions_base = Path(CFG.sessions.base_dir or str(Path("data") / "sessions"))
+	jump_clips_subdir = (CFG.sessions.jump_clips_subdir or "jump_clips").strip() or "jump_clips"
+
+	base = sessions_base / session_id
 	mp4 = base / "video.mp4"
 	h264 = base / "video.h264"
 
-	# Wait for MP4; if missing, we can't reliably clip for browser playback.
-	# (We enqueue on detection; processing may happen after session stop/mux.)
-	ok = await _wait_for_file(mp4, timeout_s=float(job.get("wait_mp4_timeout_s") or 900))
-	if not ok:
-		# If mp4 isn't ready but h264 exists, leave the job pending; caller can retry.
-		if h264.exists():
-			return "mp4 not ready yet (h264 exists) — retry later"
-		return "mp4 not found"
+	# If the session directory doesn't exist at all, this is a real failure (bad session_id / wrong base_dir).
+	if not base.exists():
+		return f"session dir not found: {base}"
 
-	# Load session start host time from DB frames (preferred) or frames.csv
-	start_host: Optional[float] = None
-	try:
-		fs = await db.get_frames(session_id=session_id, limit=1)
-		if fs and isinstance(fs[0].get("t_host"), (int, float)):
-			start_host = float(fs[0]["t_host"])
-	except Exception:
-		start_host = None
-	if start_host is None:
-		p = base / "frames.csv"
-		if p.exists():
-			try:
-				with open(p, "r", encoding="utf-8") as fh:
-					_ = fh.readline()
-					line = fh.readline()
-				parts = (line or "").strip().split(",")
-				if len(parts) >= 2 and parts[1]:
-					start_host = float(parts[1])
-			except Exception:
-				start_host = None
-	if start_host is None:
-		return "no session start_host available (frames missing)"
+	# Prefer MP4 if available (fast stream-copy cutting).
+	# If MP4 isn't available yet (session still running), attempt a "real-time" clip from the growing H264.
+	use_mp4 = bool(mp4.exists() and mp4.stat().st_size > 0)
+	use_h264 = bool(h264.exists() and h264.stat().st_size > 0)
+	if not use_mp4 and not use_h264:
+		return "mp4/h264 not ready yet — retry later"
 
-	start_sec = max(0.0, clip_start_host - start_host)
+	# Compute clip offsets using host time directly, anchored by session.json t_start.
+	# This removes any dependency on frames.csv or session-level frames in DB.
+	t_start = _read_session_t_start(base)
+	if t_start is None:
+		return "session.json missing t_start (cannot cut clip by host time)"
+	start_sec = max(0.0, clip_start_host - float(t_start))
 	duration = max(0.2, clip_end_host - clip_start_host)
 
-	ffmpeg = shutil.which("ffmpeg")
-	if not ffmpeg:
-		return "ffmpeg not installed"
+	clip_backend = get_video_backend_for_tools()
 
-	clips_dir = base / "clips"
+	clips_dir = base / jump_clips_subdir
 	clips_dir.mkdir(parents=True, exist_ok=True)
-	event_id = int(job.get("event_id") or 0)
 	out_name = f"jump_{event_id}.mp4" if event_id > 0 else f"jump_{jump_id}.mp4"
 	out_path = clips_dir / out_name
 
-	# Cut clip (fast, stream copy)
-	subprocess.run(
-		[
-			ffmpeg,
-			"-y",
-			"-ss",
-			f"{start_sec:.3f}",
-			"-t",
-			f"{duration:.3f}",
-			"-i",
-			str(mp4),
-			"-c",
-			"copy",
-			"-movflags",
-			"+faststart",
-			str(out_path),
-		],
-		stdout=subprocess.DEVNULL,
-		stderr=subprocess.DEVNULL,
-		check=False,
-	)
-	if not out_path.exists() or out_path.stat().st_size <= 0:
-		return "ffmpeg clip failed"
-
-	# Update jump video_path using jump_id (preferred)
-	rel = str(Path("data") / "sessions" / session_id / "clips" / out_name)
-	await db.set_jump_video_path_by_jump_id(jump_id, rel)
-
-	# Persist per-jump clip-relative frames (jump_frames) for sync
-	try:
-		session_frames = await db.get_frames(session_id=session_id, t0=clip_start_host, t1=clip_end_host, limit=500000)
-	except Exception:
-		session_frames = []
-	if not session_frames:
-		# fallback: parse frames.csv and filter
-		p = base / "frames.csv"
-		if p.exists():
-			try:
-				tmp = []
-				with open(p, "r", encoding="utf-8") as fh:
-					_ = fh.readline()
-					for line in fh:
-						parts = line.strip().split(",")
-						if len(parts) < 5:
-							continue
-						try:
-							th = float(parts[1])
-						except Exception:
-							continue
-						if th < clip_start_host or th > clip_end_host:
-							continue
-						tmp.append(
-							{
-								"frame_idx": int(parts[0]),
-								"t_host": th,
-								"device_ts": float(parts[2]) if parts[2] else None,
-								"width": int(parts[3]) if parts[3] else None,
-								"height": int(parts[4]) if parts[4] else None,
-							}
-						)
-				session_frames = tmp
-			except Exception:
-				session_frames = []
-
-	jf = []
-	for i, f in enumerate(session_frames):
+	# Cut clip:
+	# - If MP4 exists: fast stream-copy cut
+	# - Else: best-effort cut from raw H264 (may re-encode), enabling "real-time" clips
+	ok_cut = False
+	if use_mp4:
 		try:
-			th = float(f.get("t_host"))
+			ok_cut = bool(clip_backend.cut_clip_best_effort(mp4, out_path, start_sec=start_sec, duration_sec=duration))
+		except Exception:
+			ok_cut = False
+	else:
+		try:
+			ok_cut = bool(cut_h264_clip_to_mp4_best_effort(h264, out_path, start_sec=start_sec, duration_sec=duration, fps=video_fps))
+		except Exception:
+			ok_cut = False
+
+	if not ok_cut:
+		return "clip cut failed — retry later"
+
+	# Validate output is a playable MP4 before we publish it to the UI (set video_path).
+	# Cutting from a growing H264 can occasionally produce an invalid/truncated MP4.
+	try:
+		if not (out_path.exists() and out_path.stat().st_size > 2048):
+			try:
+				if out_path.exists():
+					out_path.unlink()
+			except Exception:
+				pass
+			return "clip output too small/absent — retry later"
+	except Exception:
+		return "clip output stat failed — retry later"
+
+	info = probe_mp4_stream_info(out_path)
+	times = extract_mp4_frame_times(out_path)
+	if not info or not times:
+		# Treat as invalid; delete and retry later.
+		try:
+			out_path.unlink()
+		except Exception:
+			pass
+		return "clip mp4 not valid/playable yet — retry later"
+
+	# Resolve the canonical jump row id before persisting DB references (jobs can be stale).
+	resolved_jump_id = await db.resolve_jump_row_id(jump_id=jump_id, event_id=event_id if event_id > 0 else None, session_id=session_id)
+	if not resolved_jump_id:
+		# Keep job pending; likely racing DB insert or referencing a cleared DB.
+		return "jump row not found in DB yet — retry later"
+
+	# Update jump video_path using resolved jump id (preferred)
+	rel = str(sessions_base / session_id / jump_clips_subdir / out_name)
+	await db.set_jump_video_path_by_jump_id(int(resolved_jump_id), rel)
+
+	# Persist per-jump clip-relative frames (jump_frames) for sync.
+	# Derive from the clip MP4 itself (ffprobe) => no frames.csv dependency.
+	w = info.get("width")
+	h = info.get("height")
+	jf = []
+	for i, tv in enumerate(times):
+		try:
+			tv_f = float(tv)
 		except Exception:
 			continue
 		jf.append(
 			{
-				"frame_idx": i,
-				"t_video": max(0.0, th - clip_start_host),
-				"t_host": th,
-				"device_ts": f.get("device_ts"),
-				"width": f.get("width"),
-				"height": f.get("height"),
+				"frame_idx": int(i),
+				"t_video": max(0.0, tv_f),
+				"t_host": float(clip_start_host) + max(0.0, tv_f),
+				"device_ts": None,
+				"width": int(w) if isinstance(w, (int, float)) else None,
+				"height": int(h) if isinstance(h, (int, float)) else None,
 			}
 		)
-	await db.replace_jump_frames(jump_id, jf)
+	await db.replace_jump_frames(int(resolved_jump_id), jf)
 
 	return f"ok (clip={rel}, frames={len(jf)})"
 

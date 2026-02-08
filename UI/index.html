@@ -4,111 +4,100 @@
 <head>
   <meta charset="utf-8"/>
   <title>Movesense Live</title>
+  <link rel="stylesheet" href="/static/css/common.css">
   <style>
-    body { font-family: sans-serif; margin: 16px; }
     #status { margin-bottom: 10px; }
-    #data { white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    canvas { border: 1px solid #ddd; margin-top: 10px; }
-    .page { display: flex; flex-direction: column; gap: 12px; }
-    .layout { display: flex; gap: 16px; align-items: flex-start; }
-    .leftPanel { width: 360px; min-width: 320px; }
-    .rightPanel { flex: 1; min-width: 560px; }
-    .panel { padding: 10px; border: 1px solid #ddd; margin-top: 12px; }
-    .panel h3 { margin: 0 0 8px 0; font-size: 14px; }
-    .btnRow { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
-    .small { font-size: 12px; color: #555; }
-    .fieldRow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-    .fieldRow label { font-size: 12px; }
-    .fieldRow input { width: 74px; }
   </style>
 </head>
-<body>
-  <h2>Movesense Live IMU</h2>
-  <div style="margin-top: 8px; margin-bottom: 8px;">
-    <span style="padding:4px 8px; border-bottom:2px solid #1976d2; font-weight:bold;">Connect</span>
-    <a href="/jumps" style="margin-left:8px; padding:4px 8px; text-decoration:none; color:#1976d2;">Jump Review</a>
-  </div>
+<body data-nav-page="connect">
+  <!-- PRELOAD_SKATERS -->
+  <div id="navContainer"></div>
 
   <div class="page">
   <div class="layout">
     <!-- LEFT: connect controls + controls -->
     <div class="leftPanel">
       <div class="panel">
-        <h3>Connect Sensor</h3>
+        <h3>Skater Selection</h3>
         <div>
-          <label for="deviceInput"><strong>Device MAC / name:</strong></label><br/>
-          <input id="deviceInput" type="text" size="24" placeholder="74:92:BA:10:F9:00" />
+          <label for="skaterSelect"><strong>Select Skater:</strong></label><br/>
+          <select id="skaterSelect" style="width: 100%; padding: 6px; margin-top: 4px;">
+            <option value="">-- Select Skater --</option>
+            <!-- SKATER_OPTIONS -->
+          </select>
         </div>
-        <div class="btnRow">
-          <button id="scanBtn">Scan</button>
+        <div class="btnRow" style="margin-top: 8px;">
           <button id="connectBtn">Connect</button>
           <button id="disconnectBtn">Disconnect</button>
         </div>
+        <div id="connectionStatus" class="small" style="margin-top: 8px; color: #666;"></div>
       </div>
 
       <div class="panel">
-        <h3>Connect Video</h3>
+        <h3>Detection Settings</h3>
+        <div class="fieldRow">
+          <label>Min height (m):
+            <input id="minHeightInput" type="number" step="0.01">
+          </label>
+          <label>Min |az-g| (m/s²):
+            <input id="minAzInput" type="number" step="0.1">
+          </label>
+          <label>Min ωz (°/s):
+            <input id="minGzInput" type="number" step="10">
+          </label>
+          <label>Min separation (s):
+            <input id="minSepInput" type="number" step="0.1">
+          </label>
+          <label>Min revs:
+            <input id="minRevsInput" type="number" step="0.1">
+          </label>
+        </div>
         <div class="btnRow">
-          <button id="videoConnectBtn">Video Connect</button>
-          <button id="videoDisconnectBtn">Video Disconnect</button>
-        </div>
-
-        <div style="margin-top: 12px; border-top: 1px dashed #ddd; padding-top: 10px;">
-          <strong style="font-size: 13px;">Jump Detection</strong>
-          <div class="btnRow" style="margin-top: 6px;">
-            <button id="startDetectBtn">Start detection</button>
-            <button id="stopDetectBtn">Stop detection</button>
-            <span id="detectStatus" class="small" style="margin-left: 6px;"></span>
-          </div>
-          <div class="small" style="margin-top: 6px;">
-            Total jumps (this session): <span id="jumpCount">0</span>
-          </div>
-
-          <div class="fieldRow">
-            <label>Min height (m):
-              <input id="minHeightInput" type="number" step="0.01">
-            </label>
-            <label>Min |az-g| (m/s²):
-              <input id="minAzInput" type="number" step="0.1">
-            </label>
-            <label>Min ωz (°/s):
-              <input id="minGzInput" type="number" step="10">
-            </label>
-            <label>Min separation (s):
-              <input id="minSepInput" type="number" step="0.1">
-            </label>
-            <label>Min revs:
-              <input id="minRevsInput" type="number" step="0.1">
-            </label>
-          </div>
-          <div class="btnRow">
-            <button id="saveConfigBtn">Save detection settings</button>
-          </div>
+          <button id="saveConfigBtn">Save detection settings</button>
         </div>
       </div>
-    </div>
 
-    <!-- RIGHT: plots (top) + video preview (bottom) -->
+      <div class="panel">
+        <div class="btnRow">
+          <button id="startDetectBtn">Start</button>
+          <button id="stopDetectBtn">Stop</button>
+          <span id="detectStatus" class="small" style="margin-left: 6px;"></span>
+        </div>
+        <div class="small" style="margin-top: 6px;">
+          Total jumps (this session): <span id="jumpCount">0</span>
+        </div>
+      </div>
+  </div>
+
+    <!-- RIGHT: plots and video preview side-by-side -->
     <div class="rightPanel">
-      <div class="panel">
-        <h3>IMU plots</h3>
-        <div style="margin-top: 6px;">
-          <strong>Acceleration (X/Y/Z)</strong>
-          <canvas id="plotAcc" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+      <div style="display: flex; gap: 16px; align-items: flex-start;">
+        <!-- IMU plots on the left -->
+        <div class="panel" style="flex: 1; min-width: 400px;">
+          <h3>IMU plots</h3>
+          <div style="margin-top: 6px;">
+            <strong>Acceleration (X/Y/Z)</strong>
+            <canvas id="plotAcc" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+          </div>
+          <div style="margin-top: 10px;">
+            <strong>Gyro (X/Y/Z)</strong>
+            <canvas id="plotGyro" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+          </div>
+          <div style="margin-top: 10px;">
+            <strong>Magnetometer (X/Y/Z)</strong>
+            <canvas id="plotMag" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
+          </div>
+          <div id="timeStatus" class="small" style="margin-top:6px;"></div>
         </div>
-        <div style="margin-top: 10px;">
-          <strong>Gyro (X/Y/Z)</strong>
-          <canvas id="plotGyro" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
-        </div>
-        <div style="margin-top: 10px;">
-          <strong>Magnetometer (X/Y/Z)</strong>
-          <canvas id="plotMag" width="900" height="140" style="display:block; margin-top:4px; border:1px solid #ddd; width:100%;"></canvas>
-        </div>
-      </div>
 
-      <div class="panel">
-        <h3>Video preview</h3>
-        <img id="videoFeed" alt="OAK-D stream" style="width: 100%; max-width: 100%; border: 1px solid #ddd; background:#000; display:block;" />
+        <!-- Video preview on the right -->
+        <div class="panel" style="flex: 1; min-width: 300px;">
+          <h3>Video preview</h3>
+          <div class="small" style="margin-bottom:6px;">Module 3 (primary)</div>
+          <img id="videoFeed" alt="Module 3 stream" style="width: 100%; max-width: 100%; border: 1px solid #ddd; background:#000; display:block;" />
+          <div id="videoTimeStatus" class="small" style="margin-top:4px;"></div>
+          <!-- GS camera preview removed (Module 3 only for now) -->
+        </div>
       </div>
     </div>
   </div>
@@ -118,7 +107,15 @@
     <pre id="logBox" style="height: 220px; overflow-y: auto; border: 1px solid #ddd; padding: 6px; background: #fafafa; font-size: 11px;"></pre>
   </div>
   </div>
+  <script src="/static/js/common.js"></script>
   <script>
+    // #region agent log
+    (function _dbg(m, d, hid) {
+      fetch('http://localhost:7243/ingest/6e691183-5f7e-4bb6-878a-57c72a043c44', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'index.html:script', message: m, data: d || {}, timestamp: Date.now(), hypothesisId: hid }) }).catch(function () {});
+    })('script_start', {}, 'H1');
+    // #endregion
+    vLoad.renderNav('connect');
+    // Use local addLog (defined below); do NOT redeclare const addLog here - would conflict with function addLog
     // WebSocket: add ping + reconnect + heartbeat to diagnose freezes/stalls.
     let ws = null;
     let _wsReconnectAttempt = 0;
@@ -137,12 +134,10 @@
     const WS_PING_EVERY_MS = 2000;
     const WS_RECONNECT_BASE_MS = 500;
     const WS_RECONNECT_MAX_MS = 5000;
-    const deviceInput = document.getElementById('deviceInput');
-    const scanBtn = document.getElementById('scanBtn');
+    const skaterSelect = document.getElementById('skaterSelect');
     const connectBtn = document.getElementById('connectBtn');
     const disconnectBtn = document.getElementById('disconnectBtn');
-    const videoConnectBtn = document.getElementById('videoConnectBtn');
-    const videoDisconnectBtn = document.getElementById('videoDisconnectBtn');
+    const connectionStatus = document.getElementById('connectionStatus');
     const startDetectBtn = document.getElementById('startDetectBtn');
     const stopDetectBtn = document.getElementById('stopDetectBtn');
     const detectStatus = document.getElementById('detectStatus');
@@ -178,6 +173,8 @@
     const gyroX = [], gyroY = [], gyroZ = [];
     // Magnetometer series
     const magX = [], magY = [], magZ = [];
+    // Host epoch timestamps for each plotted point (best-effort)
+    const tHost = [];
 
     const colors = ['#1976d2', '#d32f2f', '#388e3c']; // x=blue, y=red, z=green
     let sampleRate = null; // Hz, from server messages
@@ -185,8 +182,14 @@
     let plotDirty = false; // only redraw when new samples arrive
     let _imuSampleCounter = 0; // for plot decimation
     const TARGET_PLOT_HZ = 80; // cap plotted sample rate to keep UI responsive (especially w/ video)
+    let _lastPlotTHost = null;
+    const timeStatusEl = document.getElementById('timeStatus');
+    const videoTimeStatusEl = document.getElementById('videoTimeStatus');
 
     function addLog(line) {
+      // #region agent log
+      if (!logBox) { fetch('http://localhost:7243/ingest/6e691183-5f7e-4bb6-878a-57c72a043c44', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'index.html:addLog', message: 'addLog called but logBox is null', data: { line: String(line).slice(0, 80) }, timestamp: Date.now(), hypothesisId: 'H3' }) }).catch(function () {}); return; }
+      // #endregion
       const ts = new Date().toISOString();
       logBox.textContent += `[${ts}] ${line}\n`;
       // Prevent unbounded log growth (can freeze the tab over time).
@@ -309,10 +312,20 @@
             _imuMsgCount += 1;
             _imuSampleCount += samples.length;
             _lastImuMsgMs = Date.now();
+            // IMU is actually connected when we receive data
+            if (!imuConnected) {
+              imuConnected = true;
+              updateConnectionStatus();
+              addLog('IMU sensor connected (receiving data)');
+            }
             const decim = Math.max(1, Math.round(((sampleRate || 0) > 0 ? sampleRate : 200) / TARGET_PLOT_HZ));
             for (const s of samples) {
               _imuSampleCounter += 1;
               if ((_imuSampleCounter % decim) !== 0) continue;
+              // Use server-provided per-sample t (epoch seconds) when available; fall back to packet time.
+              const th = (s && typeof s.t === 'number' && isFinite(s.t)) ? Number(s.t) : (typeof msg.t === 'number' ? Number(msg.t) : null);
+              pushLimited(tHost, (typeof th === 'number' && isFinite(th)) ? th : null);
+              if (typeof th === 'number' && isFinite(th)) _lastPlotTHost = th;
               if (s && Array.isArray(s.acc)) {
                 const a = s.acc;
                 pushLimited(accX, a[0] ?? 0);
@@ -333,6 +346,11 @@
               }
             }
             plotDirty = true;
+            try {
+              if (timeStatusEl && typeof _lastPlotTHost === 'number') {
+                timeStatusEl.textContent = `Last IMU t_host: ${formatTimeFromEpoch(_lastPlotTHost)}`;
+              }
+            } catch (e) {}
           }
         } catch(e) {
           console.error(e);
@@ -344,20 +362,122 @@
     let _lastSessionId = null;
     let _jumpCount = 0;
 
-    // Restore last-used device from localStorage, if any
-    try {
-      const last = localStorage.getItem('vload_last_device');
-      if (last) {
-        deviceInput.value = last;
-        addLog(`Restored last device from storage: ${last}`);
+    let currentSkaterId = null;
+    let allSkaters = [];
+    
+    // Track connection status separately for IMU and Video
+    let imuConnected = false;
+    let videoConnected = false;
+
+    // Load skaters on page load (use server-preloaded list if present, else fetch or DOM)
+    async function loadSkaters() {
+      try {
+        const preloaded = typeof window.__PRELOADED_SKATERS__ !== 'undefined' && Array.isArray(window.__PRELOADED_SKATERS__);
+        if (preloaded) {
+          allSkaters = window.__PRELOADED_SKATERS__;
+        } else if (skaterSelect.options.length > 1) {
+          // Server-rendered options already in DOM; build allSkaters from them
+          allSkaters = [];
+          for (let i = 1; i < skaterSelect.options.length; i++) {
+            const opt = skaterSelect.options[i];
+            allSkaters.push({ id: parseInt(opt.value, 10), name: opt.textContent || '' });
+          }
+        } else {
+          const response = await fetch('/api/skaters');
+          if (!response.ok) {
+            addLog('Failed to load skaters');
+            return;
+          }
+          const data = await response.json();
+          allSkaters = Array.isArray(data.skaters) ? data.skaters : [];
+        }
+
+        // Populate dropdown only if we don't already have server-rendered options
+        if (skaterSelect.options.length <= 1) {
+          skaterSelect.innerHTML = '<option value="">-- Select Skater --</option>';
+          allSkaters.forEach(skater => {
+            const option = document.createElement('option');
+            option.value = skater.id;
+            option.textContent = skater.name;
+            skaterSelect.appendChild(option);
+          });
+        }
+
+        // Restore last selected skater from localStorage
+        try {
+          const last = localStorage.getItem('vload_last_skater_id');
+          if (last) {
+            skaterSelect.value = last;
+            currentSkaterId = parseInt(last);
+            await loadSkaterSettings(currentSkaterId);
+          }
+        } catch (e) {
+          console.error('localStorage error', e);
+        }
+      } catch (e) {
+        console.error('Failed to load skaters:', e);
+        addLog('Failed to load skaters: ' + e.message);
       }
-    } catch (e) {
-      console.error('localStorage error', e);
     }
+
+    // Load detection settings for selected skater
+    async function loadSkaterSettings(skaterId) {
+      if (!skaterId) {
+        // Load defaults
+        await loadDetectConfig();
+        return;
+      }
+      try {
+        const response = await fetch(`/api/skaters/${skaterId}/detection-settings`);
+        if (!response.ok) {
+          addLog('Failed to load skater settings');
+          await loadDetectConfig(); // Fall back to defaults
+          return;
+        }
+        const data = await response.json();
+        const settings = data.settings || data.defaults || {};
+        
+        // Populate inputs
+        if (typeof settings.min_jump_height_m === 'number' && minHeightInput) minHeightInput.value = settings.min_jump_height_m.toFixed(2);
+        if (typeof settings.min_jump_peak_az_no_g === 'number' && minAzInput) minAzInput.value = settings.min_jump_peak_az_no_g.toFixed(1);
+        if (typeof settings.min_jump_peak_gz_deg_s === 'number' && minGzInput) minGzInput.value = settings.min_jump_peak_gz_deg_s.toFixed(0);
+        if (typeof settings.min_new_event_separation_s === 'number' && minSepInput) minSepInput.value = settings.min_new_event_separation_s.toFixed(1);
+        if (typeof settings.min_revs === 'number' && minRevsInput) minRevsInput.value = settings.min_revs.toFixed(1);
+      } catch (e) {
+        console.error('Failed to load skater settings:', e);
+        await loadDetectConfig(); // Fall back to defaults
+      }
+    }
+
+    // Handle skater selection change
+    skaterSelect.onchange = async function() {
+      const skaterId = parseInt(skaterSelect.value) || null;
+      currentSkaterId = skaterId;
+      if (skaterId) {
+        try {
+          localStorage.setItem('vload_last_skater_id', String(skaterId));
+        } catch (e) {
+          console.error('localStorage set error', e);
+        }
+        await loadSkaterSettings(skaterId);
+      } else {
+        await loadDetectConfig(); // Load defaults
+      }
+    };
 
     function pushLimited(arr, value) {
       arr.push(value);
       while (arr.length > maxPts) arr.shift();
+    }
+
+    function formatTimeFromEpoch(tSec) {
+      if (typeof tSec !== 'number' || !isFinite(tSec)) return '';
+      const d = new Date(tSec * 1000);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      const ms = String(d.getMilliseconds()).padStart(3, '0');
+      return `${hh}:${mm}:${ss}.${ms}`;
     }
 
     function drawSeries(ctx, series) {
@@ -411,6 +531,14 @@
         const seconds = n / sampleRate;
         timeLabel += ` (~${seconds.toFixed(1)} s window)`;
       }
+      // Show wall-clock time range if available (helps spot sync drift quickly).
+      try {
+        const t0 = tHost.length ? tHost[0] : null;
+        const t1 = tHost.length ? tHost[tHost.length - 1] : null;
+        if (typeof t0 === 'number' && isFinite(t0) && typeof t1 === 'number' && isFinite(t1) && t1 >= t0) {
+          timeLabel += `  ${formatTimeFromEpoch(t0)} → ${formatTimeFromEpoch(t1)}`;
+        }
+      } catch (e) {}
       const timeWidth = ctx.measureText(timeLabel).width;
       ctx.fillText(timeLabel, (w - timeWidth) / 2, h - 2);
 
@@ -472,84 +600,159 @@
     // Start the WS connection (with ping + reconnect + heartbeat).
     connectWebSocket();
 
-    // Scan button: call /scan, fill first device into input, and show brief status
-    scanBtn.onclick = async () => {
-      addLog('Scan button clicked: starting scan...');
-      try {
-        const resp = await fetch('/scan');
-        if (!resp.ok) {
-          addLog(`Scan failed with status ${resp.status}`);
-          return;
-        }
-        const data = await resp.json();
-        const devices = data.devices || [];
-        if (!devices.length) {
-          addLog('Scan completed: no Movesense devices found');
-          return;
-        }
-        const first = devices[0];
-        deviceInput.value = first.address;
-        addLog(`Scan completed: found ${devices.length} device(s); first=${first.name || first.address} (${first.address})`);
-      } catch (e) {
-        console.error(e);
-        addLog(`Scan error: ${e}`);
+    // Helper function to update connection status message
+    function updateConnectionStatus() {
+      const parts = [];
+      if (imuConnected) {
+        parts.push('IMU: Connected');
+      } else {
+        parts.push('IMU: Not Available');
       }
-    };
+      if (videoConnected) {
+        parts.push('Video: Connected');
+      } else {
+        parts.push('Video: Not Available');
+      }
+      
+      connectionStatus.textContent = parts.join(', ');
+      
+      // Set color based on status
+      if (imuConnected && videoConnected) {
+        connectionStatus.style.color = '#388e3c'; // Green - both connected
+      } else if (imuConnected || videoConnected) {
+        connectionStatus.style.color = '#f57c00'; // Orange - partial connection
+      } else {
+        connectionStatus.style.color = '#d32f2f'; // Red - neither connected
+      }
+    }
 
-    // Connect button: POST /connect with the entered device string
+    // Connect button: connect to skater's device and camera
     connectBtn.onclick = async () => {
-      const device = deviceInput.value.trim();
-      if (!device) {
-        addLog('Connect clicked with empty device; please enter an address or scan first.');
+      // #region agent log
+      fetch('http://localhost:7243/ingest/6e691183-5f7e-4bb6-878a-57c72a043c44', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'index.html:connectBtn.onclick', message: 'Connect clicked', data: { currentSkaterId: currentSkaterId }, timestamp: Date.now(), hypothesisId: 'H2' }) }).catch(function () {});
+      // #endregion
+      if (!currentSkaterId) {
+        connectionStatus.textContent = 'Please select a skater first';
+        connectionStatus.style.color = '#d32f2f';
+        addLog('Connect clicked but no skater selected');
         return;
       }
-      addLog(`Connect request for ${device}`);
+
+      connectionStatus.textContent = 'Connecting...';
+      connectionStatus.style.color = '#666';
+      imuConnected = false;
+      videoConnected = false;
+      addLog(`Connect request for skater ID ${currentSkaterId}`);
+
       try {
-        const resp = await fetch('/connect', {
+        // #region agent log
+        fetch('http://localhost:7243/ingest/6e691183-5f7e-4bb6-878a-57c72a043c44', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'index.html:connectBtn.beforeFetch', message: 'About to fetch /connect', data: { currentSkaterId: currentSkaterId }, timestamp: Date.now(), hypothesisId: 'H4' }) }).catch(function () {});
+        // #endregion
+        // Connect to IMU sensor
+        const connectResp = await fetch('/connect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ device })
+          body: JSON.stringify({ skater_id: currentSkaterId })
         });
-        if (!resp.ok) {
-          addLog(`Connect failed with status ${resp.status}`);
-          return;
+        
+        if (!connectResp.ok) {
+          const errorData = await connectResp.json().catch(() => ({ detail: 'Connection failed' }));
+          const errorMsg = errorData.detail || `Connect failed with status ${connectResp.status}`;
+          addLog(`IMU connect failed: ${errorMsg}`);
+          imuConnected = false;
+        } else {
+          const connectData = await connectResp.json();
+          addLog(connectData.detail || 'IMU connect request sent');
+          // Don't set imuConnected = true here - wait for actual IMU data to arrive
+          // The status will be updated when IMU messages are received via WebSocket
         }
-        const data = await resp.json();
-        addLog(data.detail || 'Connect request sent');
 
-        // Save last-used device
+        // Connect to camera (try regardless of IMU status)
         try {
-          localStorage.setItem('vload_last_device', device);
+          const videoResp = await fetch('/video/connect', { method: 'POST' });
+          if (!videoResp.ok) {
+            addLog('Video connect failed with status ' + videoResp.status);
+            videoConnected = false;
+          } else {
+            await videoResp.json();
+            addLog('Video connect request sent');
+            if (videoFeed) {
+              videoFeed.src = '/video/mjpeg?fps=10&ts=' + Date.now();
+            }
+            // Check actual video status - refreshVideoStatus will set videoConnected based on real status
+            await refreshVideoStatus();
+            // Don't set videoConnected = true here - refreshVideoStatus will set it based on actual status
+          }
         } catch (e) {
-          console.error('localStorage set error', e);
+          addLog('Video connect error: ' + e);
+          videoConnected = false;
         }
+        
+        // Update status message with both IMU and Video status
+        updateConnectionStatus();
       } catch (e) {
         console.error(e);
+        imuConnected = false;
+        videoConnected = false;
+        connectionStatus.textContent = 'Connection error: ' + e.message;
+        connectionStatus.style.color = '#d32f2f';
         addLog(`Connect error: ${e}`);
       }
     };
 
     // Disconnect button
     disconnectBtn.onclick = async () => {
+      connectionStatus.textContent = 'Disconnecting...';
+      connectionStatus.style.color = '#666';
       addLog('Disconnect button clicked');
       try {
+        // Disconnect IMU
         const resp = await fetch('/disconnect', { method: 'POST' });
         if (!resp.ok) {
-          addLog(`Disconnect failed with status ${resp.status}`);
-          return;
+          addLog(`IMU disconnect failed with status ${resp.status}`);
+        } else {
+          const data = await resp.json();
+          addLog(data.detail || 'IMU disconnect request sent');
         }
-        const data = await resp.json();
-        addLog(data.detail || 'Disconnect request sent');
+        imuConnected = false;
+
+        // Disconnect video
+        try {
+          const videoResp = await fetch('/video/disconnect', { method: 'POST' });
+          if (!videoResp.ok) {
+            addLog('Video disconnect failed with status ' + videoResp.status);
+          } else {
+            await videoResp.json();
+            addLog('Video streaming stopped');
+            if (videoFeed) {
+              videoFeed.removeAttribute('src');
+            }
+            await refreshVideoStatus();
+          }
+        } catch (e) {
+          addLog('Video disconnect error: ' + e);
+        }
+        videoConnected = false;
+
+        // Update status message
+        updateConnectionStatus();
       } catch (e) {
         console.error(e);
         addLog(`Disconnect error: ${e}`);
+        imuConnected = false;
+        videoConnected = false;
+        updateConnectionStatus();
       }
     };
 
     async function refreshVideoStatus() {
       try {
         const resp = await fetch('/video/status');
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          videoConnected = false;
+          updateConnectionStatus();
+          return;
+        }
         const st = await resp.json();
         const cur = { running: !!st.running, has_frame: !!st.has_frame, error: st.error || null };
         const changed = !_lastVideoState ||
@@ -563,7 +766,21 @@
           addLog(text);
           _lastVideoState = cur;
         }
+        
+        // Update video connection status
+        videoConnected = cur.running;
+        updateConnectionStatus();
+
+        // Host-time only: show latest frame timestamp if available.
+        try {
+          if (videoTimeStatusEl) {
+            const th = (typeof st.t_last_frame === 'number' && isFinite(st.t_last_frame)) ? Number(st.t_last_frame) : null;
+            videoTimeStatusEl.textContent = th != null ? `Last video frame t_host: ${formatTimeFromEpoch(th)}` : '';
+          }
+        } catch (e) {}
       } catch (e) {
+        videoConnected = false;
+        updateConnectionStatus();
         // ignore
       }
     }
@@ -591,8 +808,19 @@
       }
     }
 
+    function _sizeToStr(v) {
+      try {
+        if (Array.isArray(v) && v.length === 2) return `${v[0]}x${v[1]}`;
+      } catch (e) {}
+      return '';
+    }
+
     if (saveConfigBtn) {
       saveConfigBtn.onclick = async function () {
+        if (!currentSkaterId) {
+          addLog('Please select a skater first');
+          return;
+        }
         const payload = {
           min_jump_height_m: minHeightInput ? parseFloat(minHeightInput.value) : 0,
           min_jump_peak_az_no_g: minAzInput ? parseFloat(minAzInput.value) : 0,
@@ -600,19 +828,20 @@
           min_new_event_separation_s: minSepInput ? parseFloat(minSepInput.value) : 0,
           min_revs: minRevsInput ? parseFloat(minRevsInput.value) : 0,
         };
-        addLog('Saving detection settings...');
+        addLog(`Saving detection settings for skater ${currentSkaterId}...`);
         try {
-          const resp = await fetch('/config', {
+          const resp = await fetch(`/api/skaters/${currentSkaterId}/detection-settings`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ jump: payload })
           });
           if (!resp.ok) {
-            addLog('Config save failed with status ' + resp.status);
+            const errorData = await resp.json().catch(() => ({ detail: 'Save failed' }));
+            addLog('Config save failed: ' + (errorData.detail || resp.status));
             return;
           }
           const data = await resp.json();
-          addLog(data.detail || 'Jump config updated (reconnect to apply)');
+          addLog(data.detail || 'Detection settings saved for skater');
         } catch (e) {
           console.error(e);
           addLog('Config save error: ' + e);
@@ -664,56 +893,41 @@
       };
     }
 
-    if (videoConnectBtn) {
-      videoConnectBtn.onclick = async () => {
-        addLog('Video connect requested...');
-        try {
-          const resp = await fetch('/video/connect', { method: 'POST' });
-          if (!resp.ok) {
-            addLog('Video connect failed with status ' + resp.status);
-            return;
-          }
-          await resp.json();
-          addLog('Video streaming started');
-          if (videoFeed) {
-            // Request a conservative MJPEG fps to reduce bandwidth/CPU contention with IMU plotting.
-            videoFeed.src = '/video/mjpeg?fps=10&ts=' + Date.now();
-          }
-          await refreshVideoStatus();
-        } catch (e) {
-          addLog('Video connect error: ' + e);
-        }
-      };
-    }
-
-    if (videoDisconnectBtn) {
-      videoDisconnectBtn.onclick = async () => {
-        addLog('Video disconnect requested...');
-        try {
-          const resp = await fetch('/video/disconnect', { method: 'POST' });
-          if (!resp.ok) {
-            addLog('Video disconnect failed with status ' + resp.status);
-            return;
-          }
-          await resp.json();
-          addLog('Video streaming stopped');
-          if (videoFeed) {
-            videoFeed.removeAttribute('src');
-          }
-          await refreshVideoStatus();
-        } catch (e) {
-          addLog('Video disconnect error: ' + e);
-        }
-      };
-    }
 
     // Start/Stop Session buttons removed (recording is automatic with detection).
 
+    // Initialize connection status
+    updateConnectionStatus();
+    
     // Poll status occasionally (useful if camera is unplugged)
     setInterval(refreshVideoStatus, 1500);
     refreshVideoStatus();
+    
+    // Check IMU connection status periodically based on data reception
+    setInterval(() => {
+      const now = Date.now();
+      const IMU_TIMEOUT_MS = 3000; // Consider IMU disconnected if no data for 3 seconds
+      const wasConnected = imuConnected;
+      
+      if (_lastImuMsgMs > 0 && (now - _lastImuMsgMs) < IMU_TIMEOUT_MS) {
+        // IMU is connected (receiving data)
+        if (!imuConnected) {
+          imuConnected = true;
+          updateConnectionStatus();
+        }
+      } else if (_lastImuMsgMs > 0 && (now - _lastImuMsgMs) >= IMU_TIMEOUT_MS) {
+        // IMU was connected but stopped receiving data
+        if (imuConnected) {
+          imuConnected = false;
+          updateConnectionStatus();
+          addLog('IMU sensor disconnected (no data received)');
+        }
+      }
+      // If _lastImuMsgMs is 0, we never received data, so keep imuConnected as false
+    }, 1000); // Check every second
 
-    // Load detection config on page load
+    // Load skaters and detection config on page load
+    loadSkaters();
     loadDetectConfig();
   </script>
 </body>

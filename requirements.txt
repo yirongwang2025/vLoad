@@ -3,4 +3,6 @@ uvicorn[standard]
 bleak
 asyncpg
 pypdf==5.1.0
-depthai==3.2.1
+Pillow>=10.0.0
+mediapipe>=0.10.0
+opencv-python-headless>=4.8.0

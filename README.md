@@ -258,6 +258,70 @@ python -m uvicorn server:app --host 0.0.0.0 --port 8080
 ```
 
 Then open the browser to `http://<server-ip>:8080`, click **Scan**, select or confirm the MAC, and click **Connect**.  
+
+### Configuration (no environment variables)
+
+This project reads runtime settings from **`config.json`** in the repo root.
+Start by copying `config.example.json` to `config.json` and editing it.
+
+- **Database**: set `database.url` to enable PostgreSQL persistence.
+- **Video**: set `video.backend` and (if needed) `video.picamera2.*` camera indices and tuning.
 You should see the three plots updating and, after a second or so, a `[JumpDetector][Phase1]` line in the log.
+
+---
+
+## Raspberry Pi: use a USB Bluetooth adapter (disable onboard Bluetooth)
+
+This project uses **Bleak** on Linux, which talks to **BlueZ**. By default, Bleak will use the system’s default Bluetooth adapter (usually `hci0`). If you disable the onboard Bluetooth, your long‑range USB adapter typically becomes `hci0` automatically.
+
+### Disable the onboard Bluetooth (recommended)
+
+1. Edit the boot config:
+   - Raspberry Pi OS Bookworm: `/boot/firmware/config.txt`
+   - Older images (Bullseye): `/boot/config.txt`
+
+2. Add this line (anywhere):
+
+   `dtoverlay=disable-bt`
+
+3. Disable the UART Bluetooth helper (prevents the onboard controller from coming back):
+
+```bash
+sudo systemctl disable --now hciuart
+```
+
+4. Reboot:
+
+```bash
+sudo reboot
+```
+
+### Verify the USB adapter is active
+
+After reboot, plug in the USB adapter and run:
+
+```bash
+lsusb
+bluetoothctl list
+bluetoothctl show
+```
+
+You should see exactly one controller, and it should correspond to the USB dongle. If your dongle needs firmware (common for some Realtek chipsets), check:
+
+```bash
+dmesg | grep -iE "bluetooth|btusb|firmware"
+```
+
+### If the USB adapter is not `hci0` (optional override)
+
+If the USB adapter shows up as `hci1` (or similar), you can force this project to use it by setting:
+
+Set `movesense.ble_adapter` in `config.json`, for example:
+
+```json
+{ "movesense": { "ble_adapter": "hci1" } }
+```
+
+Then start the server normally.
 
 

@@ -1,0 +1,133 @@
+"""
+Database package. Re-exports all public API so `from modules import db` and
+db.list_jumps(), db.init_db(), etc. continue to work unchanged.
+"""
+# Pool and lifecycle (from pool submodule)
+from modules.db.pool import (
+	init_db,
+	get_status,
+	close_db,
+	get_pool,
+	_to_dt,
+)
+# Sessions and frames
+from modules.db.sessions import (
+	upsert_session_start,
+	update_session_stop,
+	update_session_camera_calibration,
+	replace_frames,
+	get_frames,
+)
+# Jumps, jump_frames, imu_samples, annotations
+from modules.db.jumps import (
+	replace_jump_frames,
+	get_jump_frames,
+	insert_jump_with_imu,
+	update_annotation,
+	update_annotation_by_jump_id,
+	update_jump_video_mark,
+	update_jump_video_mark_by_jump_id,
+	recompute_marked_imu_metrics,
+	recompute_marked_imu_metrics_by_jump_id,
+	update_jump_pose_metrics,
+	update_jump_pose_metrics_by_jump_id,
+	resolve_jump_id_from_event_id,
+	list_jumps,
+	get_jump_with_imu,
+	get_jump_with_imu_by_jump_id,
+	resolve_jump_row_id,
+	set_jump_video_path,
+	set_jump_video_path_by_jump_id,
+	delete_jump,
+	delete_jump_by_jump_id,
+	delete_jumps_bulk,
+)
+# Devices
+from modules.db.devices import (
+	list_devices,
+	get_device_by_mac,
+	get_device_by_name,
+	upsert_device,
+	delete_device,
+	resolve_device_identifier,
+)
+# Skaters, skater_devices, skater_coaches, detection settings
+from modules.db.skaters import (
+	list_skaters,
+	get_skater_by_id,
+	upsert_skater,
+	delete_skater,
+	get_skater_coaches,
+	add_skater_coach,
+	remove_skater_coach,
+	get_skater_devices,
+	add_skater_device,
+	remove_skater_device,
+	get_skater_detection_settings,
+	upsert_skater_detection_settings,
+)
+# Coaches
+from modules.db.coaches import (
+	list_coaches,
+	get_coach_by_id,
+	upsert_coach,
+	delete_coach,
+	get_coach_skaters,
+)
+
+__all__ = [
+	"init_db",
+	"get_status",
+	"close_db",
+	"get_pool",
+	"_to_dt",
+	"upsert_session_start",
+	"update_session_stop",
+	"update_session_camera_calibration",
+	"replace_frames",
+	"get_frames",
+	"replace_jump_frames",
+	"get_jump_frames",
+	"insert_jump_with_imu",
+	"update_annotation",
+	"update_annotation_by_jump_id",
+	"update_jump_video_mark",
+	"update_jump_video_mark_by_jump_id",
+	"recompute_marked_imu_metrics",
+	"recompute_marked_imu_metrics_by_jump_id",
+	"update_jump_pose_metrics",
+	"update_jump_pose_metrics_by_jump_id",
+	"resolve_jump_id_from_event_id",
+	"list_jumps",
+	"get_jump_with_imu",
+	"get_jump_with_imu_by_jump_id",
+	"resolve_jump_row_id",
+	"set_jump_video_path",
+	"set_jump_video_path_by_jump_id",
+	"delete_jump",
+	"delete_jump_by_jump_id",
+	"delete_jumps_bulk",
+	"list_devices",
+	"get_device_by_mac",
+	"get_device_by_name",
+	"upsert_device",
+	"delete_device",
+	"resolve_device_identifier",
+	"list_skaters",
+	"get_skater_by_id",
+	"upsert_skater",
+	"delete_skater",
+	"get_skater_coaches",
+	"add_skater_coach",
+	"remove_skater_coach",
+	"get_skater_devices",
+	"add_skater_device",
+	"remove_skater_device",
+	"get_skater_detection_settings",
+	"upsert_skater_detection_settings",
+	"list_coaches",
+	"get_coach_by_id",
+	"upsert_coach",
+	"delete_coach",
+	"get_coach_skaters",
+]
