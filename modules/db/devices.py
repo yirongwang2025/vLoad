@@ -1,6 +1,7 @@
 """Devices: list_devices, get_device, upsert_device, delete_device, resolve_device_identifier."""
 from typing import Any, Dict, List, Optional
 
+from modules.db.helpers import device_row_to_dict
 from modules.db.pool import get_pool
 
 # Device management functions
@@ -19,16 +20,7 @@ async def list_devices() -> List[Dict[str, Any]]:
 			ORDER BY name, mac_address;
 			"""
 		)
-		return [
-			{
-				"id": int(r["id"]),
-				"mac_address": str(r["mac_address"]),
-				"name": str(r["name"]),
-				"created_at": r["created_at"].isoformat() if r["created_at"] else None,
-				"updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
-			}
-			for r in rows
-		]
+		return [device_row_to_dict(r) for r in rows]
 
 
 async def get_device_by_mac(mac_address: str) -> Optional[Dict[str, Any]]:
@@ -52,13 +44,7 @@ async def get_device_by_mac(mac_address: str) -> Optional[Dict[str, Any]]:
 		)
 		if not row:
 			return None
-		return {
-			"id": int(row["id"]),
-			"mac_address": str(row["mac_address"]),
-			"name": str(row["name"]),
-			"created_at": row["created_at"].isoformat() if row["created_at"] else None,
-			"updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-		}
+		return device_row_to_dict(row)
 
 
 async def get_device_by_name(name: str) -> Optional[Dict[str, Any]]:
@@ -82,13 +68,7 @@ async def get_device_by_name(name: str) -> Optional[Dict[str, Any]]:
 		)
 		if not row:
 			return None
-		return {
-			"id": int(row["id"]),
-			"mac_address": str(row["mac_address"]),
-			"name": str(row["name"]),
-			"created_at": row["created_at"].isoformat() if row["created_at"] else None,
-			"updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-		}
+		return device_row_to_dict(row)
 
 
 async def upsert_device(mac_address: str, name: str) -> Dict[str, Any]:
@@ -119,13 +99,7 @@ async def upsert_device(mac_address: str, name: str) -> Dict[str, Any]:
 		)
 		if not row:
 			raise RuntimeError("Failed to upsert device")
-		return {
-			"id": int(row["id"]),
-			"mac_address": str(row["mac_address"]),
-			"name": str(row["name"]),
-			"created_at": row["created_at"].isoformat() if row["created_at"] else None,
-			"updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-		}
+		return device_row_to_dict(row)
 
 
 async def delete_device(device_id: int) -> Dict[str, Any]:

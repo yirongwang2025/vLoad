@@ -3,6 +3,7 @@ import math
 import statistics
 from typing import Any, Dict, List, Optional, Sequence
 
+from modules.db.helpers import frame_row_to_dict, imu_sample_row_to_dict, jump_row_to_dict
 from modules.db.pool import get_pool, _to_dt
 
 async def replace_jump_frames(jump_id: int, frames: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -67,19 +68,7 @@ async def get_jump_frames(jump_id: int, limit: int = 200000) -> List[Dict[str, A
 			jid,
 			lim,
 		)
-	out: List[Dict[str, Any]] = []
-	for r in rows:
-		out.append(
-			{
-				"frame_idx": int(r["frame_idx"]),
-				"t_video": float(r["t_video"]),
-				"t_host": float(r["t_host"]),
-				"device_ts": float(r["device_ts"]) if r["device_ts"] is not None else None,
-				"width": int(r["width"]) if r["width"] is not None else None,
-				"height": int(r["height"]) if r["height"] is not None else None,
-			}
-		)
-	return out
+	return [frame_row_to_dict(r) for r in rows]
 
 
 async def insert_jump_with_imu(
@@ -958,50 +947,7 @@ async def list_jumps(limit: int = 200) -> List[Dict[str, Any]]:
 			""",
 			lim,
 		)
-	out: List[Dict[str, Any]] = []
-	for r in rows:
-		out.append(
-			{
-				"jump_id": int(r["id"]),
-				"event_id": r["event_id"],
-				"session_id": r["session_id"],
-				"video_path": r["video_path"],
-				"t_peak": r["t_peak"].timestamp() if r["t_peak"] else None,
-				"t_start": r["t_start"].timestamp() if r["t_start"] else None,
-				"t_end": r["t_end"].timestamp() if r["t_end"] else None,
-				"t_takeoff_calc": r["t_takeoff_calc"].timestamp() if r.get("t_takeoff_calc") else None,
-				"t_landing_calc": r["t_landing_calc"].timestamp() if r.get("t_landing_calc") else None,
-				"t_takeoff_video": r["t_takeoff_video"].timestamp() if r.get("t_takeoff_video") else None,
-				"t_takeoff_video_t": float(r["t_takeoff_video_t"]) if r.get("t_takeoff_video_t") is not None else None,
-				"t_landing_video": r["t_landing_video"].timestamp() if r.get("t_landing_video") else None,
-				"t_landing_video_t": float(r["t_landing_video_t"]) if r.get("t_landing_video_t") is not None else None,
-				"theta_z_rad": float(r["theta_z_rad"]) if r.get("theta_z_rad") is not None else None,
-				"revolutions_est": float(r["revolutions_est"]) if r.get("revolutions_est") is not None else None,
-				"revolutions_class": int(r["revolutions_class"]) if r.get("revolutions_class") is not None else None,
-				"underrotation": float(r["underrotation"]) if r.get("underrotation") is not None else None,
-				"underrot_flag": bool(r["underrot_flag"]) if r.get("underrot_flag") is not None else None,
-				"flight_time_marked": float(r["flight_time_marked"]) if r.get("flight_time_marked") is not None else None,
-				"height_marked": float(r["height_marked"]) if r.get("height_marked") is not None else None,
-				"rotation_phase_marked": float(r["rotation_phase_marked"]) if r.get("rotation_phase_marked") is not None else None,
-				"theta_z_rad_marked": float(r["theta_z_rad_marked"]) if r.get("theta_z_rad_marked") is not None else None,
-				"revolutions_est_marked": float(r["revolutions_est_marked"]) if r.get("revolutions_est_marked") is not None else None,
-				"revolutions_class_marked": int(r["revolutions_class_marked"]) if r.get("revolutions_class_marked") is not None else None,
-				"underrotation_marked": float(r["underrotation_marked"]) if r.get("underrotation_marked") is not None else None,
-				"underrot_flag_marked": bool(r["underrot_flag_marked"]) if r.get("underrot_flag_marked") is not None else None,
-				"flight_time_pose": float(r["flight_time_pose"]) if r.get("flight_time_pose") is not None else None,
-				"height_pose": float(r["height_pose"]) if r.get("height_pose") is not None else None,
-				"revolutions_pose": float(r["revolutions_pose"]) if r.get("revolutions_pose") is not None else None,
-				"flight_time": r["flight_time"],
-				"height": r["height"],
-				"acc_peak": r["acc_peak"],
-				"gyro_peak": r["gyro_peak"],
-				"rotation_phase": r["rotation_phase"],
-				"confidence": r["confidence"],
-				"name": r["name"],
-				"note": r["note"],
-				"created_at": r["created_at"].timestamp() if r["created_at"] else None,
-			}
-		)
+	out = [jump_row_to_dict(r, include_extra=False) for r in rows]
 	# #region agent log
 	_log({"location": "jumps.py:list_jumps:return", "message": "list_jumps return", "data": {"count": len(out)}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3"})
 	# #endregion
@@ -1051,66 +997,16 @@ async def get_jump_with_imu(event_id: int) -> Optional[Dict[str, Any]]:
 			jump_id,
 		)
 
-	out_samples: List[Dict[str, Any]] = []
-	for s in samples:
-		out_samples.append(
-			{
-				"t": s["t"].timestamp() if s["t"] else None,
-				"imu_timestamp": s["imu_timestamp"],
-				"acc": [s["acc_x"], s["acc_y"], s["acc_z"]],
-				"gyro": [s["gyro_x"], s["gyro_y"], s["gyro_z"]],
-				"mag": [s["mag_x"], s["mag_y"], s["mag_z"]],
-			}
-		)
+	out_samples = [imu_sample_row_to_dict(s) for s in samples]
 
 	# Fetch per-jump clip frame mapping (if available)
 	jframes = await get_jump_frames(jump_id)
 
-	return {
-		"jump_id": jump_id,
-		"event_id": j["event_id"],
-		"session_id": j["session_id"],
-		"video_path": j["video_path"],
-		"t_peak": j["t_peak"].timestamp() if j["t_peak"] else None,
-		"t_start": j["t_start"].timestamp() if j["t_start"] else None,
-		"t_end": j["t_end"].timestamp() if j["t_end"] else None,
-		"t_takeoff_calc": j["t_takeoff_calc"].timestamp() if j.get("t_takeoff_calc") else None,
-		"t_landing_calc": j["t_landing_calc"].timestamp() if j.get("t_landing_calc") else None,
-		"t_takeoff_video": j["t_takeoff_video"].timestamp() if j.get("t_takeoff_video") else None,
-		"t_takeoff_video_t": float(j["t_takeoff_video_t"]) if j.get("t_takeoff_video_t") is not None else None,
-		"t_landing_video": j["t_landing_video"].timestamp() if j.get("t_landing_video") else None,
-		"t_landing_video_t": float(j["t_landing_video_t"]) if j.get("t_landing_video_t") is not None else None,
-		"theta_z_rad": float(j["theta_z_rad"]) if j.get("theta_z_rad") is not None else None,
-		"revolutions_est": float(j["revolutions_est"]) if j.get("revolutions_est") is not None else None,
-		"revolutions_class": int(j["revolutions_class"]) if j.get("revolutions_class") is not None else None,
-		"underrotation": float(j["underrotation"]) if j.get("underrotation") is not None else None,
-		"underrot_flag": bool(j["underrot_flag"]) if j.get("underrot_flag") is not None else None,
-		"gz_bias": float(j["gz_bias"]) if j.get("gz_bias") is not None else None,
-		"flight_time_marked": float(j["flight_time_marked"]) if j.get("flight_time_marked") is not None else None,
-		"height_marked": float(j["height_marked"]) if j.get("height_marked") is not None else None,
-		"rotation_phase_marked": float(j["rotation_phase_marked"]) if j.get("rotation_phase_marked") is not None else None,
-		"theta_z_rad_marked": float(j["theta_z_rad_marked"]) if j.get("theta_z_rad_marked") is not None else None,
-		"revolutions_est_marked": float(j["revolutions_est_marked"]) if j.get("revolutions_est_marked") is not None else None,
-		"revolutions_class_marked": int(j["revolutions_class_marked"]) if j.get("revolutions_class_marked") is not None else None,
-		"underrotation_marked": float(j["underrotation_marked"]) if j.get("underrotation_marked") is not None else None,
-		"underrot_flag_marked": bool(j["underrot_flag_marked"]) if j.get("underrot_flag_marked") is not None else None,
-		"gz_bias_marked": float(j["gz_bias_marked"]) if j.get("gz_bias_marked") is not None else None,
-		"flight_time_pose": float(j["flight_time_pose"]) if j.get("flight_time_pose") is not None else None,
-		"height_pose": float(j["height_pose"]) if j.get("height_pose") is not None else None,
-		"revolutions_pose": float(j["revolutions_pose"]) if j.get("revolutions_pose") is not None else None,
-		"pose_meta": dict(j["pose_meta"]) if j.get("pose_meta") is not None else None,
-		"flight_time": j["flight_time"],
-		"height": j["height"],
-		"acc_peak": j["acc_peak"],
-		"gyro_peak": j["gyro_peak"],
-		"rotation_phase": j["rotation_phase"],
-		"confidence": j["confidence"],
-		"name": j["name"],
-		"note": j["note"],
-		"created_at": j["created_at"].timestamp() if j["created_at"] else None,
-		"imu_samples": out_samples,
-		"frames": jframes,
-	}
+	result = jump_row_to_dict(j, include_extra=True)
+	result["imu_samples"] = out_samples
+	result["frames"] = jframes
+	result["jump_id"] = jump_id
+	return result
 
 
 async def get_jump_with_imu_by_jump_id(jump_id: int) -> Optional[Dict[str, Any]]:
@@ -1157,66 +1053,16 @@ async def get_jump_with_imu_by_jump_id(jump_id: int) -> Optional[Dict[str, Any]]
 			jid,
 		)
 
-	out_samples: List[Dict[str, Any]] = []
-	for s in samples:
-		out_samples.append(
-			{
-				"t": s["t"].timestamp() if s["t"] else None,
-				"imu_timestamp": s["imu_timestamp"],
-				"acc": [s["acc_x"], s["acc_y"], s["acc_z"]],
-				"gyro": [s["gyro_x"], s["gyro_y"], s["gyro_z"]],
-				"mag": [s["mag_x"], s["mag_y"], s["mag_z"]],
-			}
-		)
+	out_samples = [imu_sample_row_to_dict(s) for s in samples]
 
 	# Fetch per-jump clip frame mapping (if available)
 	jframes = await get_jump_frames(jid)
 
-	return {
-		"jump_id": jid,
-		"event_id": j["event_id"],
-		"session_id": j["session_id"],
-		"video_path": j["video_path"],
-		"t_peak": j["t_peak"].timestamp() if j["t_peak"] else None,
-		"t_start": j["t_start"].timestamp() if j["t_start"] else None,
-		"t_end": j["t_end"].timestamp() if j["t_end"] else None,
-		"t_takeoff_calc": j["t_takeoff_calc"].timestamp() if j.get("t_takeoff_calc") else None,
-		"t_landing_calc": j["t_landing_calc"].timestamp() if j.get("t_landing_calc") else None,
-		"t_takeoff_video": j["t_takeoff_video"].timestamp() if j.get("t_takeoff_video") else None,
-		"t_takeoff_video_t": float(j["t_takeoff_video_t"]) if j.get("t_takeoff_video_t") is not None else None,
-		"t_landing_video": j["t_landing_video"].timestamp() if j.get("t_landing_video") else None,
-		"t_landing_video_t": float(j["t_landing_video_t"]) if j.get("t_landing_video_t") is not None else None,
-		"theta_z_rad": float(j["theta_z_rad"]) if j.get("theta_z_rad") is not None else None,
-		"revolutions_est": float(j["revolutions_est"]) if j.get("revolutions_est") is not None else None,
-		"revolutions_class": int(j["revolutions_class"]) if j.get("revolutions_class") is not None else None,
-		"underrotation": float(j["underrotation"]) if j.get("underrotation") is not None else None,
-		"underrot_flag": bool(j["underrot_flag"]) if j.get("underrot_flag") is not None else None,
-		"gz_bias": float(j["gz_bias"]) if j.get("gz_bias") is not None else None,
-		"flight_time_marked": float(j["flight_time_marked"]) if j.get("flight_time_marked") is not None else None,
-		"height_marked": float(j["height_marked"]) if j.get("height_marked") is not None else None,
-		"rotation_phase_marked": float(j["rotation_phase_marked"]) if j.get("rotation_phase_marked") is not None else None,
-		"theta_z_rad_marked": float(j["theta_z_rad_marked"]) if j.get("theta_z_rad_marked") is not None else None,
-		"revolutions_est_marked": float(j["revolutions_est_marked"]) if j.get("revolutions_est_marked") is not None else None,
-		"revolutions_class_marked": int(j["revolutions_class_marked"]) if j.get("revolutions_class_marked") is not None else None,
-		"underrotation_marked": float(j["underrotation_marked"]) if j.get("underrotation_marked") is not None else None,
-		"underrot_flag_marked": bool(j["underrot_flag_marked"]) if j.get("underrot_flag_marked") is not None else None,
-		"gz_bias_marked": float(j["gz_bias_marked"]) if j.get("gz_bias_marked") is not None else None,
-		"flight_time_pose": float(j["flight_time_pose"]) if j.get("flight_time_pose") is not None else None,
-		"height_pose": float(j["height_pose"]) if j.get("height_pose") is not None else None,
-		"revolutions_pose": float(j["revolutions_pose"]) if j.get("revolutions_pose") is not None else None,
-		"pose_meta": dict(j["pose_meta"]) if j.get("pose_meta") is not None else None,
-		"flight_time": j["flight_time"],
-		"height": j["height"],
-		"acc_peak": j["acc_peak"],
-		"gyro_peak": j["gyro_peak"],
-		"rotation_phase": j["rotation_phase"],
-		"confidence": j["confidence"],
-		"name": j["name"],
-		"note": j["note"],
-		"created_at": j["created_at"].timestamp() if j["created_at"] else None,
-		"imu_samples": out_samples,
-		"frames": jframes,
-	}
+	result = jump_row_to_dict(j, include_extra=True)
+	result["imu_samples"] = out_samples
+	result["frames"] = jframes
+	result["jump_id"] = jid
+	return result
 
 
 async def resolve_jump_row_id(

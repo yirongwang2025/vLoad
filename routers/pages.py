@@ -1,16 +1,18 @@
 """HTML page handlers. No path prefix – routes are /, /jumps, /devices, /skaters, /coaches."""
 import base64
 import json
-from fastapi import APIRouter, HTTPException
+
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 
-import state
+from app_state import AppState
+from deps import get_state
 from modules import db
 
 router = APIRouter(tags=["pages"])
 
 
-def _get_html(filename: str) -> str:
+def _get_html(state: AppState, filename: str) -> str:
 	"""Load page HTML lazily (B.1). 404 if UI template missing."""
 	if state.get_page_html is None:
 		raise HTTPException(status_code=503, detail="Server not ready")
@@ -31,9 +33,9 @@ def _escape_html(s: str) -> str:
 	return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-async def _connect_page_html():
+async def _connect_page_html(state: AppState):
 	"""Return Connect page HTML with skaters preloaded (shared by GET / and GET /static/index.html)."""
-	html = _get_html("index.html")
+	html = _get_html(state, "index.html")
 	placeholder_present = _PRELOAD_PLACEHOLDER in html
 	skaters = []
 	if _OPTIONS_PLACEHOLDER in html or placeholder_present:
@@ -62,77 +64,58 @@ def _connect_page_response(html: str):
 	return HTMLResponse(content=html, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
-def _shell_response() -> HTMLResponse:
+def _shell_response(state: AppState) -> HTMLResponse:
 	"""Return SPA shell HTML (B.5). Same for all app routes so client router can mount."""
-	html = _get_html("shell.html")
+	html = _get_html(state, "shell.html")
 	return HTMLResponse(content=html, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 @router.get("/api/fragments/connect", response_class=HTMLResponse)
-async def fragment_connect():
+async def fragment_connect(state: AppState = Depends(get_state)):
 	"""Full Connect page HTML for SPA to extract .page (client uses extractPageContent)."""
-	return _connect_page_response(await _connect_page_html())
+	return _connect_page_response(await _connect_page_html(state))
 
 
 @router.get("/api/fragments/jumps", response_class=HTMLResponse)
-async def fragment_jumps():
+async def fragment_jumps(state: AppState = Depends(get_state)):
 	"""Full Jump Review page HTML for SPA to extract .page."""
-	return _jumps_page_response(await _jumps_page_html())
+	return _jumps_page_response(await _jumps_page_html(state))
 
 
 @router.get("/api/fragments/devices", response_class=HTMLResponse)
-async def fragment_devices():
+async def fragment_devices(state: AppState = Depends(get_state)):
 	"""Full devices page HTML for SPA to extract .page."""
-	return HTMLResponse(content=_get_html("devices.html"), headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+	return HTMLResponse(content=_get_html(state, "devices.html"), headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 @router.get("/api/fragments/skaters", response_class=HTMLResponse)
-async def fragment_skaters():
+async def fragment_skaters(state: AppState = Depends(get_state)):
 	"""Full skaters page HTML for SPA to extract .page."""
-	return HTMLResponse(content=_get_html("skaters.html"), headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+	return HTMLResponse(content=_get_html(state, "skaters.html"), headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 @router.get("/api/fragments/coaches", response_class=HTMLResponse)
-async def fragment_coaches():
+async def fragment_coaches(state: AppState = Depends(get_state)):
 	"""Full coaches page HTML for SPA to extract .page."""
-	return HTMLResponse(content=_get_html("coaches.html"), headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+	return HTMLResponse(content=_get_html(state, "coaches.html"), headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index():
+async def index(state: AppState = Depends(get_state)):
 	"""Serve SPA shell; client loads Connect view from /api/fragments/connect."""
-	return _shell_response()
+	return _shell_response(state)
 
 
-def _jumps_debug_log(obj):
-	import os
-	try:
-		path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cursor", "debug.log")
-		with open(path, "a", encoding="utf-8") as f:
-			f.write(json.dumps(obj) + "\n")
-	except Exception:
-		pass
-
-
-async def _jumps_page_html():
+async def _jumps_page_html(state: AppState):
 	"""Return Jump Review page HTML with jumps list preloaded (same pattern as Connect/skaters)."""
-	# #region agent log
-	_jumps_debug_log({"location": "pages.py:_jumps_page_html:entry", "message": "jumps page requested", "data": {}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H1,H2"})
-	# #endregion
-	html = _get_html("jumps.html")
+	html = _get_html(state, "jumps.html")
 	placeholder_present = _PRELOAD_JUMPSS_PLACEHOLDER in html
-	# #region agent log
-	_jumps_debug_log({"location": "pages.py:_jumps_page_html:placeholder", "message": "placeholder check", "data": {"placeholder_present": placeholder_present}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H2"})
-	# #endregion
 	if not placeholder_present:
 		return html
 	try:
 		jumps_list = await db.list_jumps(limit=200)
 		if not isinstance(jumps_list, list):
 			jumps_list = []
-		# #region agent log
-		_jumps_debug_log({"location": "pages.py:_jumps_page_html:after_list", "message": "db.list_jumps result", "data": {"count": len(jumps_list)}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3,H4"})
-		# #endregion
 		# Server-render list items so list shows even if script/fetch fails (same pattern as Connect skater options)
 		if _JUMP_LIST_ITEMS_PLACEHOLDER in html:
 			from datetime import datetime
@@ -163,10 +146,7 @@ async def _jumps_page_html():
 		encoded = base64.b64encode(json_str.encode("utf-8")).decode("ascii")
 		script = f'<script>window.__PRELOADED_JUMPSS__ = JSON.parse(atob("{encoded}"));</script>'
 		html = html.replace(_PRELOAD_JUMPSS_PLACEHOLDER, script, 1)
-	except Exception as e:
-		# #region agent log
-		_jumps_debug_log({"location": "pages.py:_jumps_page_html:exception", "message": "preload failed", "data": {"error": str(e)}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3,H4"})
-		# #endregion
+	except Exception:
 		html = html.replace(_PRELOAD_JUMPSS_PLACEHOLDER, "<script>window.__PRELOADED_JUMPSS__ = [];</script>", 1)
 	return html
 
@@ -177,24 +157,24 @@ def _jumps_page_response(html: str):
 
 
 @router.get("/jumps", response_class=HTMLResponse)
-async def jumps_page():
+async def jumps_page(state: AppState = Depends(get_state)):
 	"""Serve SPA shell; client loads Jump Review view from /api/fragments/jumps."""
-	return _shell_response()
+	return _shell_response(state)
 
 
 @router.get("/devices", response_class=HTMLResponse)
-async def devices_page():
+async def devices_page(state: AppState = Depends(get_state)):
 	"""Serve SPA shell; client loads devices view from /api/fragments/devices."""
-	return _shell_response()
+	return _shell_response(state)
 
 
 @router.get("/skaters", response_class=HTMLResponse)
-async def skaters_page():
+async def skaters_page(state: AppState = Depends(get_state)):
 	"""Serve SPA shell; client loads skaters view from /api/fragments/skaters."""
-	return _shell_response()
+	return _shell_response(state)
 
 
 @router.get("/coaches", response_class=HTMLResponse)
-async def coaches_page():
+async def coaches_page(state: AppState = Depends(get_state)):
 	"""Serve SPA shell; client loads coaches view from /api/fragments/coaches."""
-	return _shell_response()
+	return _shell_response(state)

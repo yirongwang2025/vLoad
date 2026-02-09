@@ -1,21 +1,22 @@
 """Video backend routes. Routes: /video/connect, disconnect, status, mjpeg, snapshot.jpg, debug."""
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
-import state
+from app_state import AppState
+from deps import get_state
 
 router = APIRouter(tags=["video"])
 
 
 @router.post("/video/connect")
-async def video_connect():
+async def video_connect(state: AppState = Depends(get_state)):
 	"""Connect to the active video backend and start MJPEG streaming."""
 	try:
-		state._video.start()
+		state.video.start()
 		await asyncio.sleep(0.2)
-		st = state._video.get_status()
+		st = state.video.get_status()
 		if not st.get("running") and st.get("error"):
 			err = str(st.get("error"))
 			# Camera backend unavailable (e.g. picamera2 on Windows) -> 503 so UI can show a clear message
@@ -39,25 +40,25 @@ async def video_connect():
 
 
 @router.post("/video/disconnect")
-async def video_disconnect():
+async def video_disconnect(state: AppState = Depends(get_state)):
 	"""Stop the active video backend stream."""
 	try:
-		state._video.stop()
-		return {"detail": "Video streaming stopped.", "status": state._video.get_status()}
+		state.video.stop()
+		return {"detail": "Video streaming stopped.", "status": state.video.get_status()}
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=f"Video disconnect failed: {e!r}")
 
 
 @router.get("/video/status")
-async def video_status():
-	return state._video.get_status()
+async def video_status(state: AppState = Depends(get_state)):
+	return state.video.get_status()
 
 
 @router.get("/video/mjpeg")
-async def video_mjpeg(fps: float = 15.0):
+async def video_mjpeg(fps: float = 15.0, state: AppState = Depends(get_state)):
 	"""Live MJPEG stream from the active video backend."""
 	return StreamingResponse(
-		state._video.mjpeg_stream(fps=float(fps)),
+		state.video.mjpeg_stream(fps=float(fps)),
 		media_type="multipart/x-mixed-replace; boundary=frame",
 		headers={
 			"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -68,9 +69,9 @@ async def video_mjpeg(fps: float = 15.0):
 
 
 @router.get("/video/snapshot.jpg")
-async def video_snapshot():
+async def video_snapshot(state: AppState = Depends(get_state)):
 	"""Return a single latest JPEG frame."""
-	jpeg = await state._video.snapshot_jpeg()
+	jpeg = await state.video.snapshot_jpeg()
 	if jpeg is None:
 		raise HTTPException(status_code=404, detail="No JPEG frame available yet")
 	return Response(
@@ -84,10 +85,10 @@ async def video_snapshot():
 
 
 @router.get("/video/debug")
-async def video_debug():
+async def video_debug(state: AppState = Depends(get_state)):
 	"""Debug info about the latest encoded MJPEG packet."""
-	jpeg = await state._video.snapshot_jpeg()
-	st = state._video.get_status()
+	jpeg = await state.video.snapshot_jpeg()
+	st = state.video.get_status()
 	if jpeg is None:
 		return {"status": st, "has_jpeg": False}
 	head = jpeg[:8].hex()

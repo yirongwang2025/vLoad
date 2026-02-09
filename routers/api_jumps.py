@@ -1,24 +1,24 @@
 """Jumps DB API and pose. Routes: /db/jumps* (canonical by jump_id), /db/status, /pose/jumps/*/run."""
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app_state import AppState
+from deps import get_state
 from modules import db
 from schemas.requests import BulkDeletePayload, JumpMarksPayload
-
-import state
 
 router = APIRouter(tags=["api_jumps"])
 
 
-def _maybe_schedule_pose_after_marks(out: Dict[str, Any], event_id: int) -> None:
+def _maybe_schedule_pose_after_marks(state: AppState, out: Dict[str, Any], event_id: int) -> None:
 	"""If marks are complete, schedule pose run. Uses event_id (in-memory runner)."""
-	if not state._maybe_schedule_pose_for_jump:
+	if not state.maybe_schedule_pose_for_jump:
 		return
 	if out.get("t_takeoff_video_t") is None or out.get("t_landing_video_t") is None:
 		return
 	try:
-		state._maybe_schedule_pose_for_jump(int(event_id))
+		state.maybe_schedule_pose_for_jump(int(event_id))
 	except Exception:
 		pass
 
@@ -90,14 +90,14 @@ async def db_set_jump_pose_metrics_by_event_id(event_id: int, payload: Dict[str,
 
 
 @router.post("/pose/jumps/by_event_id/{event_id}/run")
-async def pose_run_for_jump_by_event_id(event_id: int, payload: Dict[str, Any] = None):
+async def pose_run_for_jump_by_event_id(event_id: int, payload: Dict[str, Any] = None, state: AppState = Depends(get_state)):
 	"""Run pose by event_id. Deprecated: use POST /pose/jumps/{jump_id}/run."""
-	if not state._run_pose_for_jump_best_effort:
+	if not state.run_pose_for_jump_best_effort:
 		raise HTTPException(status_code=501, detail="Pose runner not available")
 	payload = payload or {}
 	try:
 		max_fps = payload.get("max_fps", 10)
-		out = await state._run_pose_for_jump_best_effort(int(event_id), max_fps=float(max_fps) if max_fps is not None else 10.0)
+		out = await state.run_pose_for_jump_best_effort(int(event_id), max_fps=float(max_fps) if max_fps is not None else 10.0)
 		if out.get("ok"):
 			return out
 		raise HTTPException(status_code=400, detail=out.get("error") or "pose run failed")
@@ -154,7 +154,7 @@ async def db_bulk_delete_jumps(payload: BulkDeletePayload):
 
 
 @router.post("/db/jumps/{jump_id}/marks")
-async def db_mark_jump_video(jump_id: int, payload: JumpMarksPayload):
+async def db_mark_jump_video(jump_id: int, payload: JumpMarksPayload, state: AppState = Depends(get_state)):
 	"""Store video-verified takeoff/landing marks by jump_id. Canonical route."""
 	which = (payload.which or payload.kind or "").strip().lower()
 	t_host, t_video = payload.t_host, payload.t_video
@@ -169,7 +169,7 @@ async def db_mark_jump_video(jump_id: int, payload: JumpMarksPayload):
 			raise HTTPException(status_code=400, detail=out.get("error") or "update failed")
 		ev = out.get("event_id")
 		if ev is not None:
-			_maybe_schedule_pose_after_marks(out, int(ev))
+			_maybe_schedule_pose_after_marks(state, out, int(ev))
 		return out
 	except HTTPException:
 		raise
@@ -178,16 +178,16 @@ async def db_mark_jump_video(jump_id: int, payload: JumpMarksPayload):
 
 
 @router.post("/db/jumps/{jump_id}/recompute_marked_metrics")
-async def db_recompute_marked_metrics(jump_id: int):
+async def db_recompute_marked_metrics(jump_id: int, state: AppState = Depends(get_state)):
 	"""Recompute IMU-based metrics for a jump by jump_id. Canonical route."""
 	try:
 		out = await db.recompute_marked_imu_metrics_by_jump_id(int(jump_id))
 		if not out.get("ok"):
 			raise HTTPException(status_code=400, detail=out.get("error") or "recompute failed")
 		ev = out.get("event_id")
-		if ev is not None and state._maybe_schedule_pose_for_jump:
+		if ev is not None and state.maybe_schedule_pose_for_jump:
 			try:
-				state._maybe_schedule_pose_for_jump(int(ev))
+				state.maybe_schedule_pose_for_jump(int(ev))
 			except Exception:
 				pass
 		return out
@@ -230,9 +230,9 @@ async def db_set_jump_pose_metrics(jump_id: int, payload: Dict[str, Any]):
 
 
 @router.post("/pose/jumps/{jump_id}/run")
-async def pose_run_for_jump(jump_id: int, payload: Dict[str, Any] = None):
+async def pose_run_for_jump(jump_id: int, payload: Dict[str, Any] = None, state: AppState = Depends(get_state)):
 	"""Run MediaPipe Pose on the per-jump clip by jump_id. Canonical route."""
-	if not state._run_pose_for_jump_best_effort:
+	if not state.run_pose_for_jump_best_effort:
 		raise HTTPException(status_code=501, detail="Pose runner not available")
 	row = await db.get_jump_with_imu_by_jump_id(int(jump_id))
 	if not row or row.get("event_id") is None:
@@ -241,7 +241,7 @@ async def pose_run_for_jump(jump_id: int, payload: Dict[str, Any] = None):
 	payload = payload or {}
 	try:
 		max_fps = payload.get("max_fps", 10)
-		out = await state._run_pose_for_jump_best_effort(event_id, max_fps=float(max_fps) if max_fps is not None else 10.0)
+		out = await state.run_pose_for_jump_best_effort(event_id, max_fps=float(max_fps) if max_fps is not None else 10.0)
 		if out.get("ok"):
 			return out
 		raise HTTPException(status_code=400, detail=out.get("error") or "pose run failed")

@@ -65,7 +65,7 @@
       if (h2) parts.push(h2.outerHTML);
       var msg = doc.getElementById('messageContainer');
       if (msg) parts.push(msg.outerHTML);
-      var page = doc.querySelector('.page');
+      var page = doc.querySelector('.page') || doc.querySelector('.layout');
       if (page) parts.push(page.outerHTML);
       if (parts.length) return parts.join('');
       var body = doc.body;
@@ -76,33 +76,65 @@
     return html;
   }
 
+  /** Run fragment scripts in order; wait for each external script to load before running the next (so ConnectPage.init etc. run after connect.js loads). */
   function runScriptsFromFragment(html) {
-    try {
-      var parser = new DOMParser();
-      var doc = parser.parseFromString(html, 'text/html');
-      var scripts = doc.querySelectorAll('script');
-      for (var i = 0; i < scripts.length; i++) {
-        var s = scripts[i];
-        var src = s.getAttribute('src');
-        if (src) {
-          var alreadyLoaded = false;
-          var existing = document.querySelectorAll('script[src]');
-          for (var k = 0; k < existing.length; k++) {
-            if (existing[k].getAttribute('src') === src) { alreadyLoaded = true; break; }
+    return new Promise(function (resolve, reject) {
+      try {
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(html, 'text/html');
+        var scripts = doc.querySelectorAll('script');
+        var i = 0;
+
+        function runNext() {
+          if (i >= scripts.length) {
+            resolve();
+            return;
           }
-          if (alreadyLoaded) continue;
-          var ext = document.createElement('script');
-          ext.src = src;
-          document.body.appendChild(ext);
-        } else {
-          var inline = document.createElement('script');
-          inline.textContent = s.textContent;
-          document.body.appendChild(inline);
+          var s = scripts[i++];
+          var src = s.getAttribute('src');
+          if (src) {
+            var alreadyLoaded = false;
+            var existing = document.querySelectorAll('script[src]');
+            for (var k = 0; k < existing.length; k++) {
+              if (existing[k].getAttribute('src') === src) { alreadyLoaded = true; break; }
+            }
+            if (alreadyLoaded) {
+              var needReload = false;
+              if (src.indexOf('connect.js') !== -1 && typeof window.ConnectPage === 'undefined') needReload = true;
+              if (src.indexOf('jumps.js') !== -1 && typeof window.JumpsPage === 'undefined') needReload = true;
+              if (src.indexOf('devices.js') !== -1 && typeof window.DevicesPage === 'undefined') needReload = true;
+              if (src.indexOf('skaters.js') !== -1 && typeof window.SkatersPage === 'undefined') needReload = true;
+              if (src.indexOf('coaches.js') !== -1 && typeof window.CoachesPage === 'undefined') needReload = true;
+              if (needReload) {
+                var all = document.querySelectorAll('script[src]');
+                for (var j = 0; j < all.length; j++) {
+                  if (all[j].getAttribute('src') === src) { all[j].parentNode.removeChild(all[j]); break; }
+                }
+                alreadyLoaded = false;
+              }
+            }
+            if (alreadyLoaded) {
+              runNext();
+              return;
+            }
+            var ext = document.createElement('script');
+            ext.onload = runNext;
+            ext.onerror = runNext;
+            ext.src = src;
+            document.body.appendChild(ext);
+          } else {
+            var inline = document.createElement('script');
+            inline.textContent = s.textContent;
+            document.body.appendChild(inline);
+            runNext();
+          }
         }
+        runNext();
+      } catch (e) {
+        console.error('runScriptsFromFragment', e);
+        reject(e);
       }
-    } catch (e) {
-      console.error('runScriptsFromFragment', e);
-    }
+    });
   }
 
   function hydrateConnectView(appEl) {
@@ -163,8 +195,15 @@
       })
       .then(function (html) {
         appEl.innerHTML = extractPageContent(html);
-        runScriptsFromFragment(html);
+        return runScriptsFromFragment(html);
+      })
+      .then(function () {
         if (route === '/') hydrateConnectView(appEl);
+        var inits = { '/': 'ConnectPage', '/jumps': 'JumpsPage', '/devices': 'DevicesPage', '/skaters': 'SkatersPage', '/coaches': 'CoachesPage' };
+        var page = inits[route];
+        if (page && typeof window[page] !== 'undefined' && typeof window[page].init === 'function') {
+          window[page].init();
+        }
         /* Jumps: do not hydrate – script’s loadJumpList() builds list and attaches click handlers; hydrating would overwrite them. */
       })
       .catch(function (err) {

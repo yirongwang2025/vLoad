@@ -19,8 +19,10 @@ from fastapi.staticfiles import StaticFiles
 
 from routers.ws import manager
 from routers.sessions import session_start, session_stop
-from schemas.requests import ConnectPayload
-import state
+from schemas.requests import ConnectPayload, SessionStartPayload
+from app_state import AppState
+from fastapi import Depends
+from deps import get_state
 
 # Reuse your BLE client
 from modules.movesense_gatt import MovesenseGATTClient
@@ -32,7 +34,6 @@ from modules.config import get_config
 # ----------------------------
 # Pose auto-run (best-effort)
 # ----------------------------
-_pose_jobs_inflight: Set[int] = set()
 
 
 async def _run_pose_for_jump_best_effort(event_id: int, max_fps: float = 10.0) -> Dict[str, Any]:
@@ -171,16 +172,19 @@ def _maybe_schedule_pose_for_jump(event_id: int) -> None:
 	Fire-and-forget scheduling. Never raises.
 	"""
 	ev = int(event_id)
-	if ev in _pose_jobs_inflight:
+	if _app_state is None:
 		return
-	_pose_jobs_inflight.add(ev)
+	inflight = _app_state.pose_jobs_inflight
+	if ev in inflight:
+		return
+	inflight.add(ev)
 
 	async def _runner():
 		try:
 			await _run_pose_for_jump_best_effort(ev, max_fps=10.0)
 		finally:
 			try:
-				_pose_jobs_inflight.discard(ev)
+				inflight.discard(ev)
 			except Exception:
 				pass
 
@@ -188,7 +192,7 @@ def _maybe_schedule_pose_for_jump(event_id: int) -> None:
 		asyncio.create_task(_runner())
 	except Exception:
 		try:
-			_pose_jobs_inflight.discard(ev)
+			inflight.discard(ev)
 		except Exception:
 			pass
 
@@ -232,112 +236,29 @@ DEVICE = (CFG.movesense.default_device or "").strip()  # UI default only
 MODE = (CFG.movesense.default_mode or "IMU9").strip()  # "IMU6" or "IMU9"
 RATE = int(CFG.movesense.default_rate or 104)
 
-# IMU collector process globals (separate process architecture)
+# IMU collector / UDP (config only; runtime state lives in AppState)
 IMU_UDP_HOST = (CFG.imu_udp.host or "127.0.0.1").strip()
 IMU_UDP_PORT = int(CFG.imu_udp.port or 9999)
-_imu_proc: Optional[subprocess.Popen] = None
-_imu_udp_transport: Optional[asyncio.DatagramTransport] = None
 
-# Jump clip worker process (offloads ffmpeg + heavy DB work from realtime detection)
+# Jump clip worker (config only; process ref lives in AppState)
 JUMP_CLIP_JOBS_DIR = (CFG.jobs.jump_clip_jobs_dir or str(Path("data") / "jobs" / "jump_clips"))
-_clip_worker_proc: Optional[subprocess.Popen] = None
 
-# Active stream settings (set on /connect). Used by analysis worker.
-_active_mode: str = MODE
-_active_rate: int = RATE
-
-# Video backend (Raspberry Pi Camera Module 3 / CSI today; later Jetson/GStreamer).
-_video = get_video_backend(CFG)  # primary (Module 3)
-_video_proc: Optional[subprocess.Popen] = None
-
-# Session recording (video + IMU) for Phase A3
-_session_lock = asyncio.Lock()
-_session_id: Optional[str] = None
-_session_dir: Optional[Path] = None
-_imu_csv_fh: Optional[Any] = None
-_detection_session_id: Optional[str] = None
-
-# Jump detection config (Phase 2.5/2.6): tweakable via /config endpoint.
+# Jump detection config defaults (tweakable via /config; runtime copy lives in AppState)
 JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
 	"min_jump_height_m": 0.15,
 	"min_jump_peak_az_no_g": 3.5,
 	"min_jump_peak_gz_deg_s": 180.0,
 	"min_new_event_separation_s": 0.5,
-	# How often JumpDetectorRealtime runs its heavier window/metrics pass (seconds).
-	# Lower -> more responsive detection; higher -> lower CPU.
 	"analysis_interval_s": 0.5,
-	# Step 2.3: minimum revolutions (estimated) required to emit a jump event.
 	"min_revs": 0.0,
 }
-_jump_config: Dict[str, float] = dict(JUMP_CONFIG_DEFAULTS)
 
-# Async queue + worker task for decoupled jump analysis (Option A).
-_jump_sample_queue: Optional[asyncio.Queue] = None
-_jump_worker_task: Optional[asyncio.Task] = None
-_frame_sync_task: Optional[asyncio.Task] = None
-
-# Rolling IMU history for export / offline analysis.
+# Constants for buffer sizing (used in lifespan / workers)
 IMU_HISTORY_MAX_SECONDS: float = 60.0
-_imu_history: Deque[Dict[str, Any]] = deque()
+FRAME_HISTORY_MAX_SECONDS: float = 120.0
 
-# Rolling video frame history for real-time access and jump clip generation.
-# Similar to _imu_history, but for video frames. Pruned based on time window.
-FRAME_HISTORY_MAX_SECONDS: float = 120.0  # Keep 120 seconds (enough for multiple jumps + buffer)
-_frame_history: Deque[Dict[str, Any]] = deque()
-
-# In‑memory list of detected jump events for export / labelling.
-_jump_events: Deque[Dict[str, Any]] = deque(maxlen=1000)
-_next_event_id: int = 1
-
-# In‑memory annotations keyed by event_id (name, note, future labels).
-_jump_annotations: Dict[int, Dict[str, Any]] = {}
-
-# Track jump windows per session to ensure uniqueness (avoid overlapping video clips)
-# Format: {session_id: [(event_id, window_start, window_end), ...]}
-_jump_windows_by_session: Dict[str, List[Tuple[int, float, float]]] = {}
-
-# Manual gating for jump detection to avoid setup false‑positives.
-_jump_detection_enabled: bool = False
-
-# Lightweight debug counters (helps diagnose "no jumps detected" quickly).
-_dbg: Dict[str, Any] = {
-	"imu_packets": 0,
-	"imu_samples": 0,
-	"jump_queue_put_ok": 0,
-	"jump_queue_put_drop": 0,
-	"jump_worker_samples": 0,
-	"jump_events_emitted": 0,
-	"last_imu_t": None,
-	"last_jump_t": None,
-	"last_jump_event_id": None,
-	"ble_payload_drop": 0,
-	"ble_disconnects": 0,
-	"last_ble_disconnect_t": None,
-	"ble_payload_q_size": 0,
-	"ble_payload_q_max": None,
-	"loop_lag_ms_last": 0.0,
-	"loop_lag_ms_max": 0.0,
-	"collector_running": False,
-	"collector_pid": None,
-	"collector_last_pkt_t": None,
-	"collector_disconnects": 0,
-	"collector_last_disconnect_t": None,
-	"collector_last_error": None,
-	"imu_packets_5s": 0,
-	"imu_samples_5s": 0,
-	"imu_rate_hz_5s": 0.0,
-	"collector_rx_packets_5s": None,
-	"collector_rx_samples_5s": None,
-	"collector_rx_rate_hz_5s": None,
-	"collector_notify_stale_s": None,
-	"clip_worker_pid": None,
-	"clip_jobs_pending": 0,
-	"video_proc_pid": None,
-}
-
-# Rolling receive-rate window (server-side ground truth, independent of browser timing)
-_imu_rx_window: Deque[tuple[float, int]] = deque()  # (t_mono, n_samples)
-_imu_rx_window_pkts: Deque[tuple[float, int]] = deque()  # (t_mono, 1)
+# 3.1: single app state instance; set in lifespan, used by helpers that run outside request context
+_app_state: Optional[AppState] = None
 
 
 def _jump_log_filter(message: str) -> None:
@@ -347,15 +268,15 @@ def _jump_log_filter(message: str) -> None:
 	- Always forward Phase 1/2 diagnostics.
 	- Only forward [Jump] lines once detection has been manually enabled.
 	"""
-	global _jump_detection_enabled
-	if "[Jump]" in message and not _jump_detection_enabled:
+	enabled = _app_state.jump_detection_enabled if _app_state else False
+	if "[Jump]" in message and not enabled:
 		return
 	_log_to_clients(f"[JumpDetector] {message}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-	global _imu_proc, _imu_udp_transport, _jump_sample_queue, _jump_worker_task, _imu_history, _frame_history, _jump_events, _next_event_id, _jump_annotations, _clip_worker_proc, _video_proc
+	global _app_state
 	try:
 		# Initialise database (if configured).
 		try:
@@ -366,24 +287,51 @@ async def lifespan(app: FastAPI):
 			# We deliberately don't call _log_to_clients here because WS manager
 			# may not be ready yet.
 
-		# Start decoupled jump‑analysis worker and IMU history.
-		_jump_sample_queue = asyncio.Queue(maxsize=2000)
-		_imu_history = deque()
-		_frame_history = deque()
-		state._jump_sample_queue = _jump_sample_queue
-		state._frame_history = _frame_history
-		_jump_events = deque(maxlen=1000)
-		_next_event_id = 1
-		_jump_annotations = {}
-		_jump_worker_task = asyncio.create_task(_jump_worker_loop())
-		# Start frame sync task to pull frames from backend to in-memory buffer.
-		_frame_sync_task = asyncio.create_task(_frame_sync_loop())
+		# 3.1: Create single AppState and attach to app + module ref for helpers outside request context.
+		app_state = AppState()
+		app_state.manager = manager
+		app_state.get_page_html = get_page_html
+		app_state.UI_DIR = UI_DIR
+		app_state.video = get_video_backend(CFG)
+		app_state.cfg = CFG
+		app_state.active_mode = MODE
+		app_state.active_rate = RATE
+		app_state.jump_config = dict(JUMP_CONFIG_DEFAULTS)
+		app_state.jump_detection_enabled = False
+		app_state.session_base_dir = _session_base_dir
+		app_state.log_to_clients = _log_to_clients
+		app_state.enqueue_jump_clip_job = _enqueue_jump_clip_job
+		app_state.run_pose_for_jump_best_effort = _run_pose_for_jump_best_effort
+		app_state.maybe_schedule_pose_for_jump = _maybe_schedule_pose_for_jump
+		app_state.count_clip_jobs_pending = _count_clip_jobs_pending
+		app_state.count_clip_jobs_done = _count_clip_jobs_done
+		app_state.count_clip_jobs_failed = _count_clip_jobs_failed
+		app_state.read_last_clip_job_error = _read_last_clip_job_error
+		app_state.session_lock = asyncio.Lock()
+		# Buffers and queues (created here, consumed by workers and UDP)
+		app_state.jump_sample_queue = asyncio.Queue(maxsize=2000)
+		app_state.imu_history = deque()
+		app_state.frame_history = deque()
+		app_state.jump_events = deque(maxlen=1000)
+		app_state.next_event_id = 1
+		app_state.imu_rx_window = deque()
+		app_state.imu_rx_window_pkts = deque()
+		app.state.state = app_state
+		_app_state = app_state
+
+		# Start decoupled jump‑analysis worker and frame sync task.
+		app_state.jump_worker_task = asyncio.create_task(_jump_worker_loop(app_state))
+		app_state.frame_sync_task = asyncio.create_task(_frame_sync_loop(app_state))
 
 		# Start UDP receiver for IMU packets from collector process.
 		loop = asyncio.get_running_loop()
 
 		class _ImuUdpProtocol(asyncio.DatagramProtocol):
+			def __init__(self, st: AppState) -> None:
+				self.st = st
+
 			def datagram_received(self, data: bytes, addr):  # type: ignore[override]
+				st = self.st
 				# Parse JSON (best-effort)
 				try:
 					msg = json.loads(data.decode("utf-8"))
@@ -393,27 +341,27 @@ async def lifespan(app: FastAPI):
 				# Collector log passthrough
 				if isinstance(msg, dict) and msg.get("type") == "log":
 					txt = msg.get("msg")
-					if isinstance(txt, str):
-						_log_to_clients(txt)
+					if isinstance(txt, str) and st.log_to_clients:
+						st.log_to_clients(txt)
 					return
 
 				# Collector telemetry passthrough
 				if isinstance(msg, dict) and msg.get("type") == "collector_stat":
 					try:
 						if "disconnects" in msg:
-							_dbg["collector_disconnects"] = int(msg.get("disconnects") or 0)
+							st.dbg["collector_disconnects"] = int(msg.get("disconnects") or 0)
 						if "last_disconnect_t" in msg:
-							_dbg["collector_last_disconnect_t"] = msg.get("last_disconnect_t")
+							st.dbg["collector_last_disconnect_t"] = msg.get("last_disconnect_t")
 						if "last_error" in msg:
-							_dbg["collector_last_error"] = msg.get("last_error")
+							st.dbg["collector_last_error"] = msg.get("last_error")
 						if "rx_samples_5s" in msg:
-							_dbg["collector_rx_samples_5s"] = msg.get("rx_samples_5s")
+							st.dbg["collector_rx_samples_5s"] = msg.get("rx_samples_5s")
 						if "rx_packets_5s" in msg:
-							_dbg["collector_rx_packets_5s"] = msg.get("rx_packets_5s")
+							st.dbg["collector_rx_packets_5s"] = msg.get("rx_packets_5s")
 						if "rx_rate_hz_5s" in msg:
-							_dbg["collector_rx_rate_hz_5s"] = msg.get("rx_rate_hz_5s")
+							st.dbg["collector_rx_rate_hz_5s"] = msg.get("rx_rate_hz_5s")
 						if "notify_stale_s" in msg:
-							_dbg["collector_notify_stale_s"] = msg.get("notify_stale_s")
+							st.dbg["collector_notify_stale_s"] = msg.get("notify_stale_s")
 					except Exception:
 						pass
 					return
@@ -423,31 +371,30 @@ async def lifespan(app: FastAPI):
 					return
 
 				try:
-					_dbg["collector_last_pkt_t"] = float(time.time())
+					st.dbg["collector_last_pkt_t"] = float(time.time())
 				except Exception:
 					pass
 
 				# Collector-provided clock calibration (device timestamp -> epoch seconds)
 				try:
 					if isinstance(msg.get("imu_clock_offset_s"), (int, float)):
-						_dbg["imu_clock_offset_s"] = float(msg.get("imu_clock_offset_s"))
+						st.dbg["imu_clock_offset_s"] = float(msg.get("imu_clock_offset_s"))
 				except Exception:
 					pass
 				try:
 					if isinstance(msg.get("imu_clock_offset_fixed"), bool):
-						_dbg["imu_clock_offset_fixed"] = bool(msg.get("imu_clock_offset_fixed"))
+						st.dbg["imu_clock_offset_fixed"] = bool(msg.get("imu_clock_offset_fixed"))
 					if isinstance(msg.get("imu_clock_offset_calib_n"), (int, float)):
-						_dbg["imu_clock_offset_calib_n"] = int(msg.get("imu_clock_offset_calib_n"))
+						st.dbg["imu_clock_offset_calib_n"] = int(msg.get("imu_clock_offset_calib_n"))
 				except Exception:
 					pass
 
 				# Update rate/mode if present (collector is authoritative once running)
-				global _active_rate, _active_mode
 				try:
 					if isinstance(msg.get("rate"), (int, float)):
-						_active_rate = int(msg.get("rate"))
+						st.active_rate = int(msg.get("rate"))
 					if isinstance(msg.get("mode"), str):
-						_active_mode = str(msg.get("mode"))
+						st.active_mode = str(msg.get("mode"))
 				except Exception:
 					pass
 
@@ -458,25 +405,25 @@ async def lifespan(app: FastAPI):
 				# Server-side rolling 5s receive rate (independent of browser)
 				try:
 					now_m = time.monotonic()
-					_imu_rx_window.append((now_m, int(len(samples))))
-					_imu_rx_window_pkts.append((now_m, 1))
+					st.imu_rx_window.append((now_m, int(len(samples))))
+					st.imu_rx_window_pkts.append((now_m, 1))
 					cut = now_m - 5.0
-					while _imu_rx_window and _imu_rx_window[0][0] < cut:
-						_imu_rx_window.popleft()
-					while _imu_rx_window_pkts and _imu_rx_window_pkts[0][0] < cut:
-						_imu_rx_window_pkts.popleft()
-					s5 = sum(n for _, n in _imu_rx_window)
-					p5 = len(_imu_rx_window_pkts)
-					_dbg["imu_samples_5s"] = int(s5)
-					_dbg["imu_packets_5s"] = int(p5)
-					_dbg["imu_rate_hz_5s"] = float(s5) / 5.0
+					while st.imu_rx_window and st.imu_rx_window[0][0] < cut:
+						st.imu_rx_window.popleft()
+					while st.imu_rx_window_pkts and st.imu_rx_window_pkts[0][0] < cut:
+						st.imu_rx_window_pkts.popleft()
+					s5 = sum(n for _, n in st.imu_rx_window)
+					p5 = len(st.imu_rx_window_pkts)
+					st.dbg["imu_samples_5s"] = int(s5)
+					st.dbg["imu_packets_5s"] = int(p5)
+					st.dbg["imu_rate_hz_5s"] = float(s5) / 5.0
 				except Exception:
 					pass
 
 				# Update debug counters based on collector payload.
 				try:
-					_dbg["imu_packets"] = int(_dbg.get("imu_packets", 0)) + 1
-					_dbg["imu_samples"] = int(_dbg.get("imu_samples", 0)) + int(len(samples))
+					st.dbg["imu_packets"] = int(st.dbg.get("imu_packets", 0)) + 1
+					st.dbg["imu_samples"] = int(st.dbg.get("imu_samples", 0)) + int(len(samples))
 				except Exception:
 					pass
 
@@ -492,9 +439,9 @@ async def lifespan(app: FastAPI):
 					_last_t_i = t_i
 
 					# Jump worker queue
-					if _jump_sample_queue is not None:
+					if st.jump_sample_queue is not None:
 						try:
-							_jump_sample_queue.put_nowait(
+							st.jump_sample_queue.put_nowait(
 								{
 									"t": t_i,
 									"acc": s.get("acc", []),
@@ -504,16 +451,16 @@ async def lifespan(app: FastAPI):
 									"imu_sample_index": s.get("imu_sample_index"),
 								}
 							)
-							_dbg["jump_queue_put_ok"] = int(_dbg.get("jump_queue_put_ok", 0)) + 1
+							st.dbg["jump_queue_put_ok"] = int(st.dbg.get("jump_queue_put_ok", 0)) + 1
 						except Exception:
 							try:
-								_dbg["jump_queue_put_drop"] = int(_dbg.get("jump_queue_put_drop", 0)) + 1
+								st.dbg["jump_queue_put_drop"] = int(st.dbg.get("jump_queue_put_drop", 0)) + 1
 							except Exception:
 								pass
 
 					# History
 					try:
-						_imu_history.append(
+						st.imu_history.append(
 							{
 								"t": t_i,
 								"imu_timestamp": s.get("imu_timestamp"),
@@ -523,34 +470,33 @@ async def lifespan(app: FastAPI):
 								"mag": s.get("mag", []),
 							}
 						)
-						if len(_imu_history) > 100:
+						if len(st.imu_history) > 100:
 							cutoff = t_i - IMU_HISTORY_MAX_SECONDS
-							while _imu_history:
-								first_t = float(_imu_history[0].get("t", 0.0))
+							while st.imu_history:
+								first_t = float(st.imu_history[0].get("t", 0.0))
 								if first_t >= cutoff:
 									break
-								_imu_history.popleft()
+								st.imu_history.popleft()
 					except Exception:
 						pass
 
 					# last_imu_t
 					try:
-						_dbg["last_imu_t"] = float(t_i)
-						# Diagnostic: how far behind/ahead the incoming IMU timestamps are vs server wall time.
-						_dbg["imu_now_minus_t_s"] = float(time.time()) - float(t_i)
+						st.dbg["last_imu_t"] = float(t_i)
+						st.dbg["imu_now_minus_t_s"] = float(time.time()) - float(t_i)
 					except Exception:
 						pass
 
 					# Recording IMU CSV
 					try:
-						if _imu_csv_fh is not None:
+						if st.imu_csv_fh is not None:
 							acc = s.get("acc", []) or []
 							gyro = s.get("gyro", []) or []
 							mag = s.get("mag", []) or []
 							ax, ay, az = (acc + [None, None, None])[:3]
 							gx, gy, gz = (gyro + [None, None, None])[:3]
 							mx, my, mz = (mag + [None, None, None])[:3]
-							_imu_csv_fh.write(
+							st.imu_csv_fh.write(
 								f"{t_i},{s.get('imu_timestamp','')},{s.get('imu_sample_index','')},"
 								f"{ax if ax is not None else ''},{ay if ay is not None else ''},{az if az is not None else ''},"
 								f"{gx if gx is not None else ''},{gy if gy is not None else ''},{gz if gz is not None else ''},"
@@ -561,132 +507,135 @@ async def lifespan(app: FastAPI):
 
 				# Broadcast to WS clients (preserve existing UI message shape).
 				try:
-					asyncio.create_task(
-						manager.broadcast_json(
-							{
-								"t": time.time(),
-								"mode": msg.get("mode"),
-								"rate": msg.get("rate"),
-								"seq": msg.get("seq"),
-								"timestamp": msg.get("timestamp"),
-								"samples_len": len(samples),
-								# Include per-sample host timestamp so the index page can render human-readable time.
-								"samples": [
-									{"t": s.get("t"), "acc": s.get("acc", []), "gyro": s.get("gyro", []), "mag": s.get("mag", [])}
-									for s in samples
-								],
-								"analysis": {},
-								"first_sample": samples[0] if samples else None,
-							}
+					if st.manager:
+						asyncio.create_task(
+							st.manager.broadcast_json(
+								{
+									"t": time.time(),
+									"mode": msg.get("mode"),
+									"rate": msg.get("rate"),
+									"seq": msg.get("seq"),
+									"timestamp": msg.get("timestamp"),
+									"samples_len": len(samples),
+									"samples": [
+										{"t": s.get("t"), "acc": s.get("acc", []), "gyro": s.get("gyro", []), "mag": s.get("mag", [])}
+										for s in samples
+									],
+									"analysis": {},
+									"first_sample": samples[0] if samples else None,
+								}
+							)
 						)
-					)
 				except Exception:
 					pass
 
 		transport, _ = await loop.create_datagram_endpoint(
-			lambda: _ImuUdpProtocol(),
+			lambda: _ImuUdpProtocol(app_state),
 			local_addr=(IMU_UDP_HOST, IMU_UDP_PORT),
 		)
-		_imu_udp_transport = transport
+		app_state.imu_udp_transport = transport
 
 		# Start jump clip worker process (file-queue based)
 		try:
 			jobs_dir = Path(JUMP_CLIP_JOBS_DIR)
 			jobs_dir.mkdir(parents=True, exist_ok=True)
 			cmd = [sys.executable, "-m", "modules.jump_clip_worker", "--jobs-dir", str(jobs_dir)]
-			# Write worker logs to disk so clip failures are diagnosable on the Pi.
 			log_path = jobs_dir / "worker.log"
 			log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
-			_clip_worker_proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
-			_dbg["clip_worker_pid"] = int(_clip_worker_proc.pid) if _clip_worker_proc.pid else None
+			app_state.clip_worker_proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
+			app_state.dbg["clip_worker_pid"] = int(app_state.clip_worker_proc.pid) if app_state.clip_worker_proc.pid else None
 		except Exception:
-			_clip_worker_proc = None
-			_dbg["clip_worker_pid"] = None
+			app_state.clip_worker_proc = None
+			app_state.dbg["clip_worker_pid"] = None
 
 		# Optionally start a dedicated video collector process (keeps camera/GPU code isolated).
 		try:
-			_video_proc = start_video_collector_subprocess(CFG)
-			_dbg["video_proc_pid"] = int(_video_proc.pid) if _video_proc and _video_proc.pid else None
+			app_state.video_proc = start_video_collector_subprocess(CFG)
+			app_state.dbg["video_proc_pid"] = int(app_state.video_proc.pid) if app_state.video_proc and app_state.video_proc.pid else None
 		except Exception:
-			_video_proc = None
-			_dbg["video_proc_pid"] = None
+			app_state.video_proc = None
+			app_state.dbg["video_proc_pid"] = None
 
 		yield
 	finally:
+		# Use app_state for cleanup (same instance we created)
+		st_clean = _app_state
+		if st_clean is None:
+			return
 		# Stop optional video collector process
-		if _video_proc is not None:
+		if st_clean.video_proc is not None:
 			try:
-				_video_proc.terminate()
+				st_clean.video_proc.terminate()
 			except Exception:
 				pass
 			try:
-				_video_proc.wait(timeout=3)
+				st_clean.video_proc.wait(timeout=3)
 			except Exception:
 				pass
-			_video_proc = None
+			st_clean.video_proc = None
 			try:
-				_dbg["video_proc_pid"] = None
+				st_clean.dbg["video_proc_pid"] = None
 			except Exception:
 				pass
 
 		# Stop jump clip worker process
-		if _clip_worker_proc is not None:
+		if st_clean.clip_worker_proc is not None:
 			try:
-				_clip_worker_proc.terminate()
+				st_clean.clip_worker_proc.terminate()
 			except Exception:
 				pass
 			try:
-				_clip_worker_proc.wait(timeout=3)
+				st_clean.clip_worker_proc.wait(timeout=3)
 			except Exception:
 				pass
-			_clip_worker_proc = None
+			st_clean.clip_worker_proc = None
 			try:
-				_dbg["clip_worker_pid"] = None
+				st_clean.dbg["clip_worker_pid"] = None
 			except Exception:
 				pass
 
 		# Stop IMU collector process
-		if _imu_proc is not None:
+		if st_clean.imu_proc is not None:
 			try:
-				_imu_proc.terminate()
+				st_clean.imu_proc.terminate()
 			except Exception:
 				pass
 			try:
-				_imu_proc.wait(timeout=3)
+				st_clean.imu_proc.wait(timeout=3)
 			except Exception:
 				pass
-			_imu_proc = None
+			st_clean.imu_proc = None
 
 		# Stop UDP receiver
-		if _imu_udp_transport is not None:
+		if st_clean.imu_udp_transport is not None:
 			try:
-				_imu_udp_transport.close()
+				st_clean.imu_udp_transport.close()
 			except Exception:
 				pass
-			_imu_udp_transport = None
+			st_clean.imu_udp_transport = None
 
 		# Stop jump‑analysis worker
-		if _jump_worker_task:
-			_jump_worker_task.cancel()
+		if st_clean.jump_worker_task:
+			st_clean.jump_worker_task.cancel()
 			try:
-				await _jump_worker_task
+				await st_clean.jump_worker_task
 			except asyncio.CancelledError:
 				pass
 			except Exception:
 				pass
-		_jump_worker_task = None
-		_jump_sample_queue = None
+		st_clean.jump_worker_task = None
+		st_clean.jump_sample_queue = None
 
 		# Stop frame sync task
-		if _frame_sync_task:
-			_frame_sync_task.cancel()
+		if st_clean.frame_sync_task:
+			st_clean.frame_sync_task.cancel()
 			try:
-				await _frame_sync_task
+				await st_clean.frame_sync_task
 			except asyncio.CancelledError:
 				pass
 			except Exception:
 				pass
-		_frame_sync_task = None
+		st_clean.frame_sync_task = None
 
 
 app = FastAPI(lifespan=lifespan)
@@ -717,21 +666,22 @@ app.include_router(ws.router)
 def _log_to_clients(message: str) -> None:
 	"""Send a log line to all connected WebSocket clients. Fire-and-forget; safe to call from non-async code."""
 	try:
-		asyncio.create_task(state.manager.broadcast_json({"type": "log", "msg": message}))
+		mgr = _app_state.manager if _app_state else None
+		if mgr:
+			asyncio.create_task(mgr.broadcast_json({"type": "log", "msg": message}))
 	except RuntimeError:
 		pass
 
 
-async def _frame_sync_loop() -> None:
+async def _frame_sync_loop(st: AppState) -> None:
 	"""
-	Periodic task that syncs frames from video backend to in-memory _frame_history buffer.
+	Periodic task that syncs frames from video backend to in-memory frame_history buffer.
 	Runs continuously during server lifetime. Similar pattern to IMU buffering.
 	
 	The backend accumulates frames during recording in its own buffer; this loop
-	periodically copies them to the server's _frame_history for fast access by
+	periodically copies them to the server's frame_history for fast access by
 	jump detection and clip generation code.
 	"""
-	global _frame_history, _video
 	_last_sync_frame_idx: int = -1  # Track by frame index to avoid timestamp drift issues
 	
 	while True:
@@ -739,7 +689,7 @@ async def _frame_sync_loop() -> None:
 			await asyncio.sleep(0.1)  # Sync every 100ms (10 Hz)
 			
 			# Only sync if recording is active
-			if state._session_id is None:
+			if st.session_id is None:
 				# No active session; clear history if it's stale
 				_last_sync_frame_idx = -1
 				# Don't clear history immediately; it might be needed for recent jumps
@@ -749,10 +699,10 @@ async def _frame_sync_loop() -> None:
 			# Backend's get_frames_since filters by t_host, but we track by index to avoid gaps
 			all_backend_frames = []
 			try:
-				if _video is not None:
+				if st.video is not None:
 					# Get frames from the start of current session (or all if not tracking session start)
 					# We'll filter to only new ones using frame_idx
-					all_backend_frames = _video.get_frames_since(0.0, include_frame_idx=True, include_width_height=True)
+					all_backend_frames = st.video.get_frames_since(0.0, include_frame_idx=True, include_width_height=True)
 			except Exception:
 				# Backend may not implement get_frames_since (e.g., stub backends)
 				pass
@@ -764,7 +714,7 @@ async def _frame_sync_loop() -> None:
 					frame_idx = int(f.get("frame_idx", -1))
 					if frame_idx <= _last_sync_frame_idx:
 						continue
-					_frame_history.append(f)
+					st.frame_history.append(f)
 					_last_sync_frame_idx = max(_last_sync_frame_idx, frame_idx)
 					new_count += 1
 				except Exception:
@@ -772,18 +722,18 @@ async def _frame_sync_loop() -> None:
 			
 			# Prune old frames (keep last FRAME_HISTORY_MAX_SECONDS)
 			try:
-				if _frame_history:
+				if st.frame_history:
 					cutoff = time.time() - FRAME_HISTORY_MAX_SECONDS
 					# Since frames are added in order, we can prune from the front
-					while _frame_history:
-						first_t = float(_frame_history[0].get("t_host", 0.0))
+					while st.frame_history:
+						first_t = float(st.frame_history[0].get("t_host", 0.0))
 						if first_t >= cutoff:
 							break
 						# If we prune, reset sync index to avoid gaps
-						pruned_idx = int(_frame_history[0].get("frame_idx", -1))
+						pruned_idx = int(st.frame_history[0].get("frame_idx", -1))
 						if pruned_idx >= 0:
 							_last_sync_frame_idx = max(-1, pruned_idx - 1)
-						_frame_history.popleft()
+						st.frame_history.popleft()
 			except Exception:
 				pass
 				
@@ -795,6 +745,7 @@ async def _frame_sync_loop() -> None:
 
 
 def _ensure_unique_jump_window(
+	st: AppState,
 	session_id: Optional[str],
 	event_id: int,
 	base_window_start: float,
@@ -807,14 +758,12 @@ def _ensure_unique_jump_window(
 	
 	Returns: (adjusted_window_start, adjusted_window_end)
 	"""
-	global _jump_windows_by_session
-	
 	if not session_id:
 		# No session tracking, return base window
 		return (base_window_start, base_window_end)
 	
 	# Get existing windows for this session
-	existing_windows = _jump_windows_by_session.get(session_id, [])
+	existing_windows = st.jump_windows_by_session.get(session_id, [])
 	
 	window_start = base_window_start
 	window_end = base_window_end
@@ -857,48 +806,45 @@ def _ensure_unique_jump_window(
 				window_end = t_peak + 1.0
 	
 	# Store this window for future overlap checks
-	if session_id not in _jump_windows_by_session:
-		_jump_windows_by_session[session_id] = []
-	_jump_windows_by_session[session_id].append((event_id, window_start, window_end))
+	if session_id not in st.jump_windows_by_session:
+		st.jump_windows_by_session[session_id] = []
+	st.jump_windows_by_session[session_id].append((event_id, window_start, window_end))
 	
 	# Clean up old windows (keep last 100 per session to avoid unbounded growth)
-	if len(_jump_windows_by_session[session_id]) > 100:
-		_jump_windows_by_session[session_id] = _jump_windows_by_session[session_id][-100:]
+	if len(st.jump_windows_by_session[session_id]) > 100:
+		st.jump_windows_by_session[session_id] = st.jump_windows_by_session[session_id][-100:]
 	
 	return (window_start, window_end)
 
 
-async def _jump_worker_loop() -> None:
+async def _jump_worker_loop(st: AppState) -> None:
 	"""
 	Background task that consumes IMU samples from the queue and runs
 	JumpDetectorRealtime to emit structured jump events, decoupled from BLE.
 	"""
-	global _jump_sample_queue, _jump_events, _next_event_id, _jump_annotations
-
 	# One detector instance per worker, recreated when stream rate changes.
 	jump_detector: Optional[JumpDetectorRealtime] = None
 	last_rate: Optional[int] = None
 
 	while True:
-		if _jump_sample_queue is None:
+		if st.jump_sample_queue is None:
 			# Should not happen often; be defensive.
 			await asyncio.sleep(0.1)
 			continue
 
-		sample = await _jump_sample_queue.get()
+		sample = await st.jump_sample_queue.get()
 		try:
-			_dbg["jump_worker_samples"] = int(_dbg.get("jump_worker_samples", 0)) + 1
+			st.dbg["jump_worker_samples"] = int(st.dbg.get("jump_worker_samples", 0)) + 1
 		except Exception:
 			pass
 		# Lazily create (or recreate) detector with the active stream rate.
-		global _active_rate
-		active_rate = int(_active_rate) if int(_active_rate) > 0 else RATE
+		active_rate = int(st.active_rate) if int(st.active_rate) > 0 else RATE
 		if jump_detector is None or last_rate != active_rate:
 			jump_detector = JumpDetectorRealtime(
 				sample_rate_hz=active_rate,
 				window_seconds=3.0,
 				logger=_jump_log_filter,
-				config=_jump_config,
+				config=st.jump_config,
 			)
 			last_rate = active_rate
 		try:
@@ -910,17 +856,17 @@ async def _jump_worker_loop() -> None:
 			continue
 
 		# Only emit jump messages once detection has been explicitly enabled.
-		if not _jump_detection_enabled:
+		if not st.jump_detection_enabled:
 			continue
 
 		for ev in events:
 			try:
-				event_id = _next_event_id
-				_next_event_id += 1
+				event_id = st.next_event_id
+				st.next_event_id += 1
 				try:
-					_dbg["jump_events_emitted"] = int(_dbg.get("jump_events_emitted", 0)) + 1
-					_dbg["last_jump_t"] = float(ev.get("t_peak") or time.time())
-					_dbg["last_jump_event_id"] = int(event_id)
+					st.dbg["jump_events_emitted"] = int(st.dbg.get("jump_events_emitted", 0)) + 1
+					st.dbg["last_jump_t"] = float(ev.get("t_peak") or time.time())
+					st.dbg["last_jump_event_id"] = int(event_id)
 				except Exception:
 					pass
 
@@ -958,9 +904,9 @@ async def _jump_worker_loop() -> None:
 				}
 				# Diagnostic: emission latency relative to the detected peak timestamp.
 				try:
-					_dbg["jump_emit_delay_s"] = float(time.time()) - float(t_peak_val)
+					st.dbg["jump_emit_delay_s"] = float(time.time()) - float(t_peak_val)
 					if ev.get("t_takeoff") is not None:
-						_dbg["jump_emit_delay_from_takeoff_s"] = float(time.time()) - float(ev.get("t_takeoff"))  # type: ignore[arg-type]
+						st.dbg["jump_emit_delay_from_takeoff_s"] = float(time.time()) - float(ev.get("t_takeoff"))  # type: ignore[arg-type]
 				except Exception:
 					pass
 
@@ -968,12 +914,12 @@ async def _jump_worker_loop() -> None:
 				record = dict(jump_msg)
 				record["t_takeoff"] = ev.get("t_takeoff")
 				record["t_landing"] = ev.get("t_landing")
-				_jump_events.append(record)
+				st.jump_events.append(record)
 
 				# Ensure there is at least a stub annotation (name can be overridden later).
-				if event_id not in _jump_annotations:
-					_jump_annotations[event_id] = {"name": f"Jump {event_id}", "note": None}
-				asyncio.create_task(manager.broadcast_json(jump_msg))
+				if event_id not in st.jump_annotations:
+					st.jump_annotations[event_id] = {"name": f"Jump {event_id}", "note": None}
+				asyncio.create_task(st.manager.broadcast_json(jump_msg))
 
 				# Fire‑and‑forget persistence of this jump and its IMU window to DB.
 				try:
@@ -981,8 +927,8 @@ async def _jump_worker_loop() -> None:
 					t_peak_val = float(ev.get("t_peak", 0.0))
 					t_takeoff_val = float(ev.get("t_takeoff", t_peak_val))
 					t_landing_val = float(ev.get("t_landing", t_peak_val))
-					pre_jump_s = float(CFG.jump_recording.pre_jump_seconds)
-					post_jump_s = float(CFG.jump_recording.post_jump_seconds)
+					pre_jump_s = float(st.cfg.jump_recording.pre_jump_seconds)
+					post_jump_s = float(st.cfg.jump_recording.post_jump_seconds)
 					# Window should be centered on t_peak, but ensure it includes takeoff/landing
 					base_window_start = min(t_takeoff_val - 0.5, t_peak_val - pre_jump_s)
 					base_window_end = max(t_landing_val + 0.5, t_peak_val + post_jump_s)
@@ -990,16 +936,17 @@ async def _jump_worker_loop() -> None:
 					# Ensure window uniqueness: check for overlaps with existing jumps in same session
 					# and adjust boundaries to avoid overlap
 					window_start, window_end = _ensure_unique_jump_window(
-						state._session_id,
+						st,
+						st.session_id,
 						event_id,
 						base_window_start,
 						base_window_end,
 						t_peak_val,
 					)
-					ann = _jump_annotations.get(event_id) or {}
+					ann = st.jump_annotations.get(event_id) or {}
 					jump_for_db = dict(record)
 					# Link to current recording session (if any) so jumps can be played back.
-					jump_for_db["session_id"] = state._session_id
+					jump_for_db["session_id"] = st.session_id
 					jump_for_db["t_start"] = window_start
 					jump_for_db["t_end"] = window_end
 					# Persist immediately on detection. Any heavy post-processing (ffmpeg clip cutting,
@@ -1009,6 +956,7 @@ async def _jump_worker_loop() -> None:
 					# This avoids a classic late-binding closure bug where multiple create_task(...)
 					# calls inside the loop would all see the "last" event_id/jump_for_db/window values.
 					async def _persist_and_enqueue(
+						st_arg: AppState,
 						jump_for_db_arg: Dict[str, Any],
 						ann_arg: Dict[str, Any],
 						window_start_arg: float,
@@ -1020,11 +968,11 @@ async def _jump_worker_loop() -> None:
 						# Wait briefly for the stream to advance so we can persist the full requested window.
 						# Optimized: reduce wait time since we have in-memory buffer, and use more aggressive polling.
 						try:
-							post_jump_s = float(CFG.jump_recording.post_jump_seconds)
+							post_jump_s = float(st_arg.cfg.jump_recording.post_jump_seconds)
 							deadline = time.time() + post_jump_s + 0.5  # Reduced from 1.5s to 0.5s slack
 							wait_start = time.time()
 							while time.time() < deadline:
-								last_t = _dbg.get("last_imu_t")
+								last_t = st_arg.dbg.get("last_imu_t")
 								try:
 									last_t_f = float(last_t) if last_t is not None else None
 								except Exception:
@@ -1033,7 +981,7 @@ async def _jump_worker_loop() -> None:
 									break
 								await asyncio.sleep(0.02)  # More aggressive polling: 20ms instead of 50ms
 							try:
-								_dbg["db_window_waited_s"] = float(max(0.0, time.time() - wait_start))
+								st_arg.dbg["db_window_waited_s"] = float(max(0.0, time.time() - wait_start))
 							except Exception:
 								pass
 						except Exception:
@@ -1042,7 +990,7 @@ async def _jump_worker_loop() -> None:
 						# Slice history AFTER waiting, so we include samples up through window_end.
 						window_samples = []
 						try:
-							history_list = list(_imu_history) if _imu_history else []
+							history_list = list(st_arg.imu_history) if st_arg.imu_history else []
 							if history_list:
 								times = [float(row.get("t", 0.0)) for row in history_list]
 								left_idx = bisect.bisect_left(times, window_start_arg)
@@ -1054,43 +1002,43 @@ async def _jump_worker_loop() -> None:
 						try:
 							jump_id = await db.insert_jump_with_imu(jump_for_db_arg, ann_arg, window_samples)
 							if not jump_id:
-								_dbg["db_last_insert_error"] = "insert_jump_with_imu returned no jump_id (DB disabled or insert skipped)"
+								st_arg.dbg["db_last_insert_error"] = "insert_jump_with_imu returned no jump_id (DB disabled or insert skipped)"
 								return
-							_dbg["db_last_insert_ok_t"] = float(time.time())
-							_dbg["db_last_insert_error"] = None
-							_log_to_clients(
+							st_arg.dbg["db_last_insert_ok_t"] = float(time.time())
+							st_arg.dbg["db_last_insert_error"] = None
+							st_arg.log_to_clients(
 								f"[DB] Inserted jump: event_id={event_id_arg}, jump_id={jump_id}, samples={len(window_samples)} "
 								f"(window={window_start_arg:.3f}->{window_end_arg:.3f})"
 							)
 						except Exception as e:
-							_dbg["db_last_insert_error"] = repr(e)
-							_log_to_clients(f"[DB] insert_jump_with_imu failed for event_id={event_id_arg}: {e!r}")
+							st_arg.dbg["db_last_insert_error"] = repr(e)
+							st_arg.log_to_clients(f"[DB] insert_jump_with_imu failed for event_id={event_id_arg}: {e!r}")
 							print(f"[DB] insert_jump_with_imu failed for event_id={event_id_arg}: {e!r}")
 							return
 
 						# Enqueue clip generation job. This runs out-of-process and may complete later
 						# (e.g., after MP4 mux is available).
 						try:
-							clip_buffer_s = float(CFG.jump_recording.clip_buffer_seconds)
+							clip_buffer_s = float(st_arg.cfg.jump_recording.clip_buffer_seconds)
 							clip_start_host = float(window_start_arg) - clip_buffer_s
 							clip_end_host = float(window_end_arg) + clip_buffer_s
 							clip_duration = clip_end_host - clip_start_host
 							# Debug logging for clip length issues
-							_log_to_clients(
+							st_arg.log_to_clients(
 								f"[Clip] event_id={event_id_arg}: window=[{window_start_arg:.3f}, {window_end_arg:.3f}], "
 								f"clip=[{clip_start_host:.3f}, {clip_end_host:.3f}], duration={clip_duration:.2f}s"
 							)
 						except Exception:
-							pre_jump_s = float(CFG.jump_recording.pre_jump_seconds)
-							post_jump_s = float(CFG.jump_recording.post_jump_seconds)
+							pre_jump_s = float(st_arg.cfg.jump_recording.pre_jump_seconds)
+							post_jump_s = float(st_arg.cfg.jump_recording.post_jump_seconds)
 							clip_start_host = float(t_peak_val_arg) - pre_jump_s - 0.4
 							clip_end_host = float(t_peak_val_arg) + post_jump_s + 0.4
 
-						_enqueue_jump_clip_job(
+						st_arg.enqueue_jump_clip_job(
 							{
 								"jump_id": int(jump_id),
 								"event_id": int(event_id_arg),
-								"session_id": str(state._session_id or ""),
+								"session_id": str(st_arg.session_id or ""),
 								"clip_start_host": float(clip_start_host),
 								"clip_end_host": float(clip_end_host),
 								"video_fps": 30,
@@ -1102,8 +1050,8 @@ async def _jump_worker_loop() -> None:
 						ws_ = float(window_start)
 						we_ = float(window_end)
 					except Exception:
-						pre_jump_s = float(CFG.jump_recording.pre_jump_seconds)
-						post_jump_s = float(CFG.jump_recording.post_jump_seconds)
+						pre_jump_s = float(st.cfg.jump_recording.pre_jump_seconds)
+						post_jump_s = float(st.cfg.jump_recording.post_jump_seconds)
 						ws_ = float(t_peak_val) - pre_jump_s
 						we_ = float(t_peak_val) + post_jump_s
 					try:
@@ -1112,6 +1060,7 @@ async def _jump_worker_loop() -> None:
 						tp_ = time.time()
 					asyncio.create_task(
 						_persist_and_enqueue(
+							st,
 							dict(jump_for_db),
 							dict(ann),
 							ws_,
@@ -1191,31 +1140,6 @@ def _read_last_clip_job_error() -> Optional[str]:
 	except Exception:
 		return None
 
-
-# Populate shared state for routers (must run after all referenced defs: _session_base_dir, _log_to_clients, _enqueue_jump_clip_job, etc.)
-state.manager = manager
-state.get_page_html = get_page_html
-state.UI_DIR = UI_DIR
-state._video = _video
-state._session_id = _session_id
-state._session_dir = _session_dir
-state._session_lock = _session_lock
-state._frame_history = _frame_history
-state._dbg = _dbg
-state.CFG = CFG
-state._active_mode = _active_mode
-state._active_rate = _active_rate
-state._jump_config = _jump_config
-state._jump_detection_enabled = _jump_detection_enabled
-state._session_base_dir = _session_base_dir
-state._log_to_clients = _log_to_clients
-state._run_pose_for_jump_best_effort = _run_pose_for_jump_best_effort
-state._maybe_schedule_pose_for_jump = _maybe_schedule_pose_for_jump
-state._enqueue_jump_clip_job = _enqueue_jump_clip_job
-state._count_clip_jobs_pending = _count_clip_jobs_pending
-state._count_clip_jobs_done = _count_clip_jobs_done
-state._count_clip_jobs_failed = _count_clip_jobs_failed
-state._read_last_clip_job_error = _read_last_clip_job_error
 
 def _load_frames_start_host(session_dir: Path) -> Optional[float]:
 	"""
@@ -1396,7 +1320,7 @@ async def get_file(path: str):
 
 
 @app.post("/connect")
-async def connect_device(payload: ConnectPayload):
+async def connect_device(payload: ConnectPayload, state: AppState = Depends(get_state)):
 	"""
 	Start the IMU collector process connected to the specified device (MAC or name).
 	The collector streams IMU packets to this server over localhost UDP.
@@ -1406,23 +1330,19 @@ async def connect_device(payload: ConnectPayload):
 	- "device": MAC address or device name
 	- "skater_id": skater ID (will use first registered device for that skater)
 	"""
-	global _imu_proc, _active_rate, _active_mode
-
 	try:
 		device = (payload.device or "").strip()
 		skater_id = payload.skater_id
 		mode = (payload.mode or MODE).strip().upper()
 		rate = int(payload.rate or RATE)
-		# Persist the active stream parameters for the analysis worker.
-		_active_rate = rate
-		_active_mode = mode
+		state.active_rate = rate
+		state.active_mode = mode
 
 		# If skater_id is provided, get the first device for that skater
 		if skater_id:
 			skater_devices = await db.get_skater_devices(int(skater_id))
 			if not skater_devices:
 				raise HTTPException(status_code=400, detail="No sensor registered for this skater")
-			# Use the first device (prefer waist placement if available)
 			waist_device = next((d for d in skater_devices if d.get("placement") == "waist"), None)
 			selected_device = waist_device or skater_devices[0]
 			device = selected_device.get("mac_address")
@@ -1431,22 +1351,20 @@ async def connect_device(payload: ConnectPayload):
 		elif not device:
 			raise HTTPException(status_code=400, detail="Missing 'device' or 'skater_id' in request body.")
 
-		# Resolve device name to MAC address if it's a registered device name
 		resolved_mac = await db.resolve_device_identifier(device)
 		if resolved_mac:
-			device = resolved_mac  # Use MAC address for connection
+			device = resolved_mac
 
-		# Stop existing collector
-		if _imu_proc is not None:
+		if state.imu_proc is not None:
 			try:
-				_imu_proc.terminate()
+				state.imu_proc.terminate()
 			except Exception:
 				pass
 			try:
-				_imu_proc.wait(timeout=3)
+				state.imu_proc.wait(timeout=3)
 			except Exception:
 				pass
-			_imu_proc = None
+			state.imu_proc = None
 
 		cmd = [
 			sys.executable,
@@ -1463,130 +1381,114 @@ async def connect_device(payload: ConnectPayload):
 			"--udp-port",
 			str(IMU_UDP_PORT),
 		]
-		_imu_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		state.imu_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 		try:
-			_dbg["collector_running"] = True
-			_dbg["collector_pid"] = int(_imu_proc.pid) if _imu_proc.pid else None
+			state.dbg["collector_running"] = True
+			state.dbg["collector_pid"] = int(state.imu_proc.pid) if state.imu_proc.pid else None
 		except Exception:
 			pass
 
-		_log_to_clients(f"[Collector] Started PID={_imu_proc.pid} (mode={mode}, rate={rate}, udp={IMU_UDP_HOST}:{IMU_UDP_PORT})")
-		return {"detail": f"Starting IMU collector for {device} (mode={mode}, rate={rate})", "collector_pid": _imu_proc.pid}
+		state.log_to_clients(f"[Collector] Started PID={state.imu_proc.pid} (mode={mode}, rate={rate}, udp={IMU_UDP_HOST}:{IMU_UDP_PORT})")
+		return {"detail": f"Starting IMU collector for {device} (mode={mode}, rate={rate})", "collector_pid": state.imu_proc.pid}
 	except HTTPException:
-		# Pass through explicit HTTP errors
 		raise
 	except Exception as e:
-		_log_to_clients(f"/connect error: {e!r}")
+		state.log_to_clients(f"/connect error: {e!r}")
 		raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/disconnect")
-async def disconnect_device():
+async def disconnect_device(state: AppState = Depends(get_state)):
 	"""
 	Stop the current IMU collector process (if any).
 	"""
-	global _imu_proc
-
-	if _imu_proc is not None:
+	if state.imu_proc is not None:
 		try:
-			_imu_proc.terminate()
+			state.imu_proc.terminate()
 		except Exception:
 			pass
 		try:
-			_imu_proc.wait(timeout=3)
+			state.imu_proc.wait(timeout=3)
 		except Exception:
 			pass
-		_imu_proc = None
-
+		state.imu_proc = None
 		try:
-			_dbg["collector_running"] = False
-			_dbg["collector_pid"] = None
+			state.dbg["collector_running"] = False
+			state.dbg["collector_pid"] = None
 		except Exception:
 			pass
-
-	_log_to_clients("IMU collector stopped via /disconnect")
+	state.log_to_clients("IMU collector stopped via /disconnect")
 	return {"detail": "Stopped IMU collector"}
 
 
 @app.post("/detection/start")
-async def start_jump_detection():
+async def start_jump_detection(state: AppState = Depends(get_state)):
 	"""
 	Manually enable jump detection, to avoid false positives during sensor
 	setup / strapping on.
 	"""
-	global _jump_detection_enabled, _detection_session_id
-	_jump_detection_enabled = True
-	_log_to_clients("[JumpDetector] Detection ENABLED via /detection/start")
+	state.jump_detection_enabled = True
+	state.log_to_clients("[JumpDetector] Detection ENABLED via /detection/start")
 
-	# New simplified workflow:
-	# When detection starts, also start a recording session (best-effort) so every
-	# detected jump can later be paired with a video clip.
-	if _detection_session_id is None:
+	if state.detection_session_id is None:
 		sid = time.strftime("%Y%m%d_%H%M%S") + "_detect"
 		try:
-			# Only set _detection_session_id if session_start succeeds.
-			await session_start({"session_id": sid})
-			_detection_session_id = sid
-			_log_to_clients(f"[Session] Auto-started recording session for detection: {sid}")
+			await session_start(SessionStartPayload(session_id=sid), state=state)
+			state.detection_session_id = sid
+			state.log_to_clients(f"[Session] Auto-started recording session for detection: {sid}")
 		except HTTPException as e:
-			_detection_session_id = None
-			_log_to_clients(f"[Session] Auto-start for detection failed: {e.detail}")
+			state.detection_session_id = None
+			state.log_to_clients(f"[Session] Auto-start for detection failed: {e.detail}")
 			print(f"[Session] Auto-start for detection failed: {e.detail}")
-			# Surface the error to the caller/UI so it's not silently ignored.
 			raise
 		except Exception as e:
-			_detection_session_id = None
-			_log_to_clients(f"[Session] Auto-start for detection failed: {e!r}")
+			state.detection_session_id = None
+			state.log_to_clients(f"[Session] Auto-start for detection failed: {e!r}")
 			print(f"[Session] Auto-start for detection failed: {e!r}")
 			raise HTTPException(status_code=500, detail=f"Auto-start recording failed: {e!r}")
 
-	return {"detail": "Jump detection enabled (recording auto-started).", "session_id": _detection_session_id}
+	return {"detail": "Jump detection enabled (recording auto-started).", "session_id": state.detection_session_id}
 
 
 @app.post("/detection/stop")
-async def stop_jump_detection():
+async def stop_jump_detection(state: AppState = Depends(get_state)):
 	"""
 	Manually disable jump detection while keeping BLE streaming active.
 	"""
-	global _jump_detection_enabled, _detection_session_id
-	_jump_detection_enabled = False
-	_log_to_clients("[JumpDetector] Detection DISABLED via /detection/stop")
-
-	# Stop auto-started session (best-effort)
+	state.jump_detection_enabled = False
+	state.log_to_clients("[JumpDetector] Detection DISABLED via /detection/stop")
 	try:
-		if _detection_session_id is not None:
-			await session_stop()
-			_log_to_clients(f"[Session] Auto-stopped recording session for detection: {_detection_session_id}")
+		if state.detection_session_id is not None:
+			await session_stop(state=state)
+			state.log_to_clients(f"[Session] Auto-stopped recording session for detection: {state.detection_session_id}")
 	finally:
-		_detection_session_id = None
-
+		state.detection_session_id = None
 	return {"detail": "Jump detection disabled (recording auto-stopped)."}
 
 
 @app.get("/annotations/{event_id}")
-async def get_annotation(event_id: int):
+async def get_annotation(event_id: int, state: AppState = Depends(get_state)):
 	"""
 	Fetch stored annotation (name/note, later labels) for a jump event.
 	Returns {} if none exists.
 	"""
-	return _jump_annotations.get(event_id, {})
+	return state.jump_annotations.get(event_id, {})
 
 
 @app.post("/annotations/{event_id}")
-async def set_annotation(event_id: int, payload: Dict[str, Any]):
+async def set_annotation(event_id: int, payload: Dict[str, Any], state: AppState = Depends(get_state)):
 	"""
 	Store or update annotation for a jump event (name, note, future label fields).
 	"""
-	global _jump_annotations
 	data = payload or {}
-	current = _jump_annotations.get(event_id, {})
+	current = state.jump_annotations.get(event_id, {})
 	current.update(
 		{
 			"name": data.get("name", current.get("name")),
 			"note": data.get("note", current.get("note")),
 		}
 	)
-	_jump_annotations[event_id] = current
+	state.jump_annotations[event_id] = current
 	# Persist to DB as best‑effort (if configured).
 	try:
 		asyncio.create_task(
@@ -1624,22 +1526,20 @@ async def set_annotation_by_jump_id(jump_id: int, payload: Dict[str, Any]):
 
 
 @app.get("/config")
-async def get_config():
+async def get_config_route(state: AppState = Depends(get_state)):
 	"""
 	Return current jump detection configuration.
 	"""
-	return {"jump": _jump_config}
+	return {"jump": state.jump_config}
 
 
 @app.post("/config")
-async def set_config(payload: Dict[str, Any]):
+async def set_config(payload: Dict[str, Any], state: AppState = Depends(get_state)):
 	"""
 	Update jump detection configuration. Changes take effect on the next
 	connection (when a new JumpDetectorRealtime is created).
 	DEPRECATED: Use /api/skaters/{skater_id}/detection-settings instead.
 	"""
-	global _jump_config
-
 	body = payload or {}
 	jump_cfg = body.get("jump") or {}
 	if not isinstance(jump_cfg, dict):
@@ -1648,7 +1548,7 @@ async def set_config(payload: Dict[str, Any]):
 	for key, value in jump_cfg.items():
 		if key in JUMP_CONFIG_DEFAULTS:
 			try:
-				_jump_config[key] = float(value)
+				state.jump_config[key] = float(value)
 			except (TypeError, ValueError):
 				continue
 
@@ -1669,7 +1569,7 @@ def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 	return out
 
 @app.get("/export")
-async def export_imu(seconds: float = 30.0, mode: str = "raw"):
+async def export_imu(seconds: float = 30.0, mode: str = "raw", state: AppState = Depends(get_state)):
 	"""
 	Export recent IMU data for offline analysis / labelling.
 
@@ -1682,12 +1582,10 @@ async def export_imu(seconds: float = 30.0, mode: str = "raw"):
 	horizon = max(0.0, float(seconds))
 	cutoff = now - horizon
 
-	history_snapshot = list(_imu_history)
+	history_snapshot = list(state.imu_history) if state.imu_history else []
 
 	if mode == "jumps":
-		# Export per‑jump windows keyed by event_id. We use t_takeoff/t_landing
-		# if available; otherwise fall back to a symmetric window around t_peak.
-		events_snapshot = list(_jump_events)
+		events_snapshot = list(state.jump_events) if state.jump_events else []
 		windows = []
 		for ev in events_snapshot:
 			t_peak = float(ev.get("t_peak", 0.0))
@@ -1710,7 +1608,7 @@ async def export_imu(seconds: float = 30.0, mode: str = "raw"):
 				if t0 <= float(row.get("t", 0.0)) <= t1
 			]
 
-			ann = _jump_annotations.get(int(ev.get("event_id", 0))) or {}
+			ann = state.jump_annotations.get(int(ev.get("event_id", 0))) or {}
 
 			windows.append(
 				{

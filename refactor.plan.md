@@ -80,8 +80,8 @@ This document outlines a phased refactoring plan for the vLoad codebase (modules
   - `modules/db/coaches.py` – Coaches: list_coaches, get_coach_by_id, upsert_coach, delete_coach, get_coach_skaters.
   - `modules/db/__init__.py` – Re-exports of all public functions so `from modules import db` and `db.list_jumps(...)` etc. still work.
 
-- [ ] **Shared helpers**
-  - Add helpers for row→dict mapping (e.g. `_jump_row_to_dict`, timestamp/float extraction) to avoid repeating the same 30+ field logic in every list/get. Deferred; can be done in a follow-up.
+- [x] **Shared helpers**
+  - Add helpers for row→dict mapping (e.g. `jump_row_to_dict`, `device_row_to_dict`, timestamp/float extraction) in `modules/db/helpers.py` to avoid repeating the same 30+ field logic in every list/get.
 
 - [x] **Migration**
   - Monolith `modules/db.py` renamed to `modules/db_legacy.py`. The package `modules/db/` is the single entry point; `from modules import db` loads the package. No change to public `db.*` API used by server/routers.
@@ -149,15 +149,18 @@ This document outlines a phased refactoring plan for the vLoad codebase (modules
 
 **Goal:** Make dependencies and lifecycle explicit; simplify testing and reasoning.
 
-- [ ] **State object**
+- [x] **State object**
   - Introduce an `AppState` (or similar) dataclass or small module holding: IMU process handle, jump queue, jump_events, next_event_id, annotations, jump_windows_by_session, detection_enabled, debug counters, session_id, frame_history, imu_history, clip worker proc, video proc, etc.
   - Create one instance in lifespan and attach to `app.state` (e.g. `app.state.state = AppState()`).
+  - *Done: `app_state.py` defines `AppState`; one instance created in lifespan and attached as `app.state.state`; also stored as `_app_state` for helpers outside request context.*
 
-- [ ] **Inject state**
+- [x] **Inject state**
   - Pass `request.app.state.state` (or a dependency that returns it) into route handlers and background tasks that need it. Refactor workers (e.g. jump_worker_loop, frame_sync_loop) to accept state as an argument instead of reading globals.
+  - *Done: `deps.get_state(request)` used via `Depends(get_state)` in all relevant routes (server.py and routers: sessions, pages, api_jumps, video). Workers and UDP protocol take `AppState`; state module bridge removed.*
 
-- [ ] **Remove globals**
+- [x] **Remove globals**
   - Once all reads/writes go through app.state, remove the global variables from server.py (and any other modules that currently use them).
+  - *Done: All mutable runtime state removed from server.py. Config and constants (CFG, MODE, RATE, IMU_UDP_*, JUMP_CONFIG_DEFAULTS, etc.) kept at module level; video backend and locks created in lifespan on AppState.*
 
 **Deliverables:** Single source of truth for runtime state; no global mutable state for app lifecycle; easier to test with a fresh state instance.
 
@@ -167,17 +170,21 @@ This document outlines a phased refactoring plan for the vLoad codebase (modules
 
 **Goal:** Shrink inline script blocks; enable reuse and caching.
 
-- [ ] **Connect page**
+- [x] **Connect page**
   - Move the bulk of index.html’s `<script>` into `UI/js/connect.js` (or `index.js`). Leave a minimal inline bootstrap that initializes the app (e.g. calls `ConnectPage.init()` or similar). Ensure WebSocket, plot, connect/disconnect, and config logic live in the JS file.
+  - **Done:** `connect.js` exposes `ConnectPage.init()`; index.html loads common.js, connect.js, then calls `vLoad.renderNav('connect')` and `ConnectPage.init()`.
 
-- [ ] **Jump review page**
+- [x] **Jump review page**
   - Move jumps.html’s script into `UI/js/jumps.js` with a small inline bootstrap. Keep list, detail, video/IMU sync, and delete logic in the file.
+  - **Done:** `jumps.js` exposes `JumpsPage.init()`; jumps.html uses same bootstrap pattern.
 
-- [ ] **Other pages**
+- [x] **Other pages**
   - If devices/skaters/coaches have non-trivial JS, extract to `devices.js`, `skaters.js`, `coaches.js` as needed.
+  - **Done:** `devices.js` (DevicesPage.init), `skaters.js` (SkatersPage.init), `coaches.js` (CoachesPage.init); each HTML has minimal bootstrap.
 
-- [ ] **Serving**
+- [x] **Serving**
   - Serve JS (and CSS) from `/static/` or equivalent so browsers can cache them. Ensure paths in HTML match (e.g. `<script src="/static/js/connect.js">`).
+  - **Done:** All pages use `/static/js/*.js` and `/static/css/common.css`.
 
 **Deliverables:** Smaller HTML files; larger but cacheable JS (and shared CSS from Phase 1). No change to behavior.
 

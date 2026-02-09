@@ -1,6 +1,13 @@
 """Skaters, skater_devices, skater_coaches, detection settings."""
 from typing import Any, Dict, List, Optional
 
+from modules.db.helpers import (
+	coach_skater_row_to_dict,
+	skater_coach_link_row_to_dict,
+	skater_device_link_row_to_dict,
+	skater_device_row_to_dict,
+	skater_row_to_dict,
+)
 from modules.db.pool import get_pool
 
 async def list_skaters() -> List[Dict[str, Any]]:
@@ -18,22 +25,7 @@ async def list_skaters() -> List[Dict[str, Any]]:
 			ORDER BY name;
 			"""
 		)
-		return [
-			{
-				"id": int(r["id"]),
-				"name": str(r["name"]),
-				"date_of_birth": r["date_of_birth"].isoformat() if r["date_of_birth"] else None,
-				"gender": str(r["gender"]) if r["gender"] else None,
-				"level": str(r["level"]) if r["level"] else None,
-				"club": str(r["club"]) if r["club"] else None,
-				"email": str(r["email"]) if r["email"] else None,
-				"phone": str(r["phone"]) if r["phone"] else None,
-				"notes": str(r["notes"]) if r["notes"] else None,
-				"created_at": r["created_at"].isoformat() if r["created_at"] else None,
-				"updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
-			}
-			for r in rows
-		]
+		return [skater_row_to_dict(r) for r in rows]
 
 
 async def get_skater_by_id(skater_id: int) -> Optional[Dict[str, Any]]:
@@ -54,19 +46,7 @@ async def get_skater_by_id(skater_id: int) -> Optional[Dict[str, Any]]:
 		)
 		if not row:
 			return None
-		skater = {
-			"id": int(row["id"]),
-			"name": str(row["name"]),
-			"date_of_birth": row["date_of_birth"].isoformat() if row["date_of_birth"] else None,
-			"gender": str(row["gender"]) if row["gender"] else None,
-			"level": str(row["level"]) if row["level"] else None,
-			"club": str(row["club"]) if row["club"] else None,
-			"email": str(row["email"]) if row["email"] else None,
-			"phone": str(row["phone"]) if row["phone"] else None,
-			"notes": str(row["notes"]) if row["notes"] else None,
-			"created_at": row["created_at"].isoformat() if row["created_at"] else None,
-			"updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-		}
+		skater = skater_row_to_dict(row)
 		# Include coaches and devices
 		skater["coaches"] = await get_skater_coaches(skater_id)
 		skater["devices"] = await get_skater_devices(skater_id)
@@ -143,19 +123,7 @@ async def upsert_skater(
 			)
 		if not row:
 			raise RuntimeError("Failed to upsert skater")
-		return {
-			"id": int(row["id"]),
-			"name": str(row["name"]),
-			"date_of_birth": row["date_of_birth"].isoformat() if row["date_of_birth"] else None,
-			"gender": str(row["gender"]) if row["gender"] else None,
-			"level": str(row["level"]) if row["level"] else None,
-			"club": str(row["club"]) if row["club"] else None,
-			"email": str(row["email"]) if row["email"] else None,
-			"phone": str(row["phone"]) if row["phone"] else None,
-			"notes": str(row["notes"]) if row["notes"] else None,
-			"created_at": row["created_at"].isoformat() if row["created_at"] else None,
-			"updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-		}
+		return skater_row_to_dict(row)
 
 
 async def delete_skater(skater_id: int) -> Dict[str, Any]:
@@ -201,15 +169,7 @@ async def get_skater_coaches(skater_id: int) -> List[Dict[str, Any]]:
 			""",
 			skater_id,
 		)
-		return [
-			{
-				"id": int(r["id"]),
-				"coach_id": int(r["coach_id"]),
-				"coach_name": str(r["coach_name"]),
-				"is_head_coach": bool(r["is_head_coach"]),
-			}
-			for r in rows
-		]
+		return [coach_skater_row_to_dict(r) for r in rows]
 
 
 async def add_skater_coach(skater_id: int, coach_id: int, is_head_coach: bool = False) -> Dict[str, Any]:
@@ -241,12 +201,7 @@ async def add_skater_coach(skater_id: int, coach_id: int, is_head_coach: bool = 
 			)
 			if not row:
 				raise RuntimeError("Failed to add skater-coach relationship")
-			return {
-				"id": int(row["id"]),
-				"skater_id": int(row["skater_id"]),
-				"coach_id": int(row["coach_id"]),
-				"is_head_coach": bool(row["is_head_coach"]),
-			}
+			return skater_coach_link_row_to_dict(row)
 
 
 async def remove_skater_coach(skater_id: int, coach_id: int) -> bool:
@@ -284,16 +239,7 @@ async def get_skater_devices(skater_id: int) -> List[Dict[str, Any]]:
 			""",
 			skater_id,
 		)
-		return [
-			{
-				"id": int(r["id"]),
-				"device_id": int(r["device_id"]),
-				"device_name": str(r["device_name"]),
-				"mac_address": str(r["mac_address"]),
-				"placement": str(r["placement"]),
-			}
-			for r in rows
-		]
+		return [skater_device_row_to_dict(r) for r in rows]
 
 
 async def add_skater_device(skater_id: int, device_id: int, placement: str = "waist") -> Dict[str, Any]:
@@ -320,12 +266,7 @@ async def add_skater_device(skater_id: int, device_id: int, placement: str = "wa
 		)
 		if not row:
 			raise RuntimeError("Failed to add skater-device relationship")
-		return {
-			"id": int(row["id"]),
-			"skater_id": int(row["skater_id"]),
-			"device_id": int(row["device_id"]),
-			"placement": str(row["placement"]),
-		}
+		return skater_device_link_row_to_dict(row)
 
 
 async def remove_skater_device(skater_id: int, device_id: int) -> bool:
