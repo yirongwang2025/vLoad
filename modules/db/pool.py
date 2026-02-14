@@ -1,11 +1,14 @@
 """Connection pool, init_db, get_status, close_db, and _to_dt for the db package."""
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import asyncpg
 
 from modules.config import get_config
+
+logger = logging.getLogger(__name__)
 
 _pool: Optional[asyncpg.Pool] = None
 _last_init_error: Optional[str] = None
@@ -32,7 +35,7 @@ async def init_db() -> None:
 	dsn = (get_config().database.url or "").strip()
 	if not dsn:
 		if not _warned_no_dsn:
-			print("[DB] database.url not set in config.json; persistence disabled.")
+			logger.warning("[DB] database.url not set in config.json; persistence disabled.")
 			_warned_no_dsn = True
 		_last_init_error = "database.url not set"
 		return
@@ -111,11 +114,11 @@ async def _create_tables(conn: asyncpg.Connection) -> None:
 			"""
 		)
 	except Exception as e:
-		print(f"[DB] Warning: dedupe jumps failed: {e!r}")
+		logger.warning("[DB] dedupe jumps failed: %s", e)
 	try:
 		await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS jumps_session_event_unique ON jumps(session_id, event_id);")
 	except Exception as e:
-		print(f"[DB] Warning: failed to create UNIQUE index jumps_session_event_unique: {e!r}")
+		logger.warning("[DB] failed to create UNIQUE index jumps_session_event_unique: %s", e)
 	await conn.execute("CREATE INDEX IF NOT EXISTS jumps_session_tpeak_idx ON jumps(session_id, t_peak DESC);")
 
 	await conn.execute(
@@ -210,6 +213,7 @@ async def _create_tables(conn: asyncpg.Connection) -> None:
 		);
 		"""
 	)
+	await conn.execute("ALTER TABLE skaters ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;")
 	await conn.execute("CREATE INDEX IF NOT EXISTS skaters_name_idx ON skaters(name);")
 	await conn.execute("CREATE INDEX IF NOT EXISTS skaters_level_idx ON skaters(level);")
 

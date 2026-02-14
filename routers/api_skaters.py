@@ -1,10 +1,12 @@
 """Skater API. Routes: /api/skaters* including detection-settings."""
+import logging
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 
 from modules import db
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api_skaters"])
 
 JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
@@ -26,8 +28,20 @@ async def list_skaters_endpoint():
 			skaters = []
 		return {"skaters": skaters}
 	except Exception as e:
-		print(f"[Skaters] Error listing skaters: {e!r}")
+		logger.error("[Skaters] Error listing skaters: %s", e)
 		return {"skaters": []}
+
+
+@router.get("/api/skaters/default")
+async def get_default_skater_endpoint():
+	"""Get the default skater, if any."""
+	try:
+		skater = await db.get_default_skater()
+		if not skater:
+			return {"skater": None}
+		return {"skater": skater}
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/skaters/{skater_id}")
@@ -60,6 +74,7 @@ async def create_skater_endpoint(payload: Dict[str, Any]):
 			email=payload.get("email"),
 			phone=payload.get("phone"),
 			notes=payload.get("notes"),
+			is_default=payload.get("is_default"),
 		)
 		return skater
 	except ValueError as e:
@@ -85,6 +100,7 @@ async def update_skater_endpoint(skater_id: int, payload: Dict[str, Any]):
 			phone=payload.get("phone"),
 			notes=payload.get("notes"),
 			skater_id=skater_id,
+			is_default=payload.get("is_default"),
 		)
 		return skater
 	except ValueError as e:

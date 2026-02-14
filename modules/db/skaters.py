@@ -20,12 +20,31 @@ async def list_skaters() -> List[Dict[str, Any]]:
 	async with pool.acquire() as conn:
 		rows = await conn.fetch(
 			"""
-			SELECT id, name, date_of_birth, gender, level, club, email, phone, notes, created_at, updated_at
+			SELECT id, name, date_of_birth, gender, level, club, email, phone, notes, is_default, created_at, updated_at
 			FROM skaters
-			ORDER BY name;
+			ORDER BY is_default DESC, name;
 			"""
 		)
 		return [skater_row_to_dict(r) for r in rows]
+
+
+async def get_default_skater() -> Optional[Dict[str, Any]]:
+	"""
+	Get the skater marked as default, if any.
+	"""
+	pool = get_pool()
+	if pool is None:
+		return None
+	async with pool.acquire() as conn:
+		row = await conn.fetchrow(
+			"""
+			SELECT id, name, date_of_birth, gender, level, club, email, phone, notes, is_default, created_at, updated_at
+			FROM skaters
+			WHERE is_default = TRUE
+			LIMIT 1;
+			"""
+		)
+		return skater_row_to_dict(row) if row else None
 
 
 async def get_skater_by_id(skater_id: int) -> Optional[Dict[str, Any]]:
@@ -38,7 +57,7 @@ async def get_skater_by_id(skater_id: int) -> Optional[Dict[str, Any]]:
 	async with pool.acquire() as conn:
 		row = await conn.fetchrow(
 			"""
-			SELECT id, name, date_of_birth, gender, level, club, email, phone, notes, created_at, updated_at
+			SELECT id, name, date_of_birth, gender, level, club, email, phone, notes, is_default, created_at, updated_at
 			FROM skaters
 			WHERE id = $1;
 			""",
@@ -63,6 +82,7 @@ async def upsert_skater(
 	phone: Optional[str] = None,
 	notes: Optional[str] = None,
 	skater_id: Optional[int] = None,
+	is_default: Optional[bool] = None,
 ) -> Dict[str, Any]:
 	"""
 	Create or update a skater profile.
@@ -84,43 +104,53 @@ async def upsert_skater(
 			pass
 	
 	async with pool.acquire() as conn:
-		if skater_id:
-			# Update existing
-			row = await conn.fetchrow(
-				"""
-				UPDATE skaters
-				SET name = $1, date_of_birth = $2, gender = $3, level = $4, club = $5,
-				    email = $6, phone = $7, notes = $8, updated_at = NOW()
-				WHERE id = $9
-				RETURNING id, name, date_of_birth, gender, level, club, email, phone, notes, created_at, updated_at;
-				""",
-				name_str,
-				dob_date,
-				gender.strip() if gender else None,
-				level.strip() if level else None,
-				club.strip() if club else None,
-				email.strip() if email else None,
-				phone.strip() if phone else None,
-				notes.strip() if notes else None,
-				skater_id,
-			)
-		else:
-			# Create new
-			row = await conn.fetchrow(
-				"""
-				INSERT INTO skaters (name, date_of_birth, gender, level, club, email, phone, notes)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-				RETURNING id, name, date_of_birth, gender, level, club, email, phone, notes, created_at, updated_at;
-				""",
-				name_str,
-				dob_date,
-				gender.strip() if gender else None,
-				level.strip() if level else None,
-				club.strip() if club else None,
-				email.strip() if email else None,
-				phone.strip() if phone else None,
-				notes.strip() if notes else None,
-			)
+		async with conn.transaction():
+			if is_default:
+				await conn.execute("UPDATE skaters SET is_default = FALSE;")
+			if skater_id:
+				# Update existing
+				set_default = ", is_default = $10" if is_default is not None else ""
+				args = [
+					name_str,
+					dob_date,
+					gender.strip() if gender else None,
+					level.strip() if level else None,
+					club.strip() if club else None,
+					email.strip() if email else None,
+					phone.strip() if phone else None,
+					notes.strip() if notes else None,
+					skater_id,
+				]
+				if is_default is not None:
+					args.append(is_default)
+				row = await conn.fetchrow(
+					f"""
+					UPDATE skaters
+					SET name = $1, date_of_birth = $2, gender = $3, level = $4, club = $5,
+					    email = $6, phone = $7, notes = $8, updated_at = NOW(){set_default}
+					WHERE id = $9
+					RETURNING id, name, date_of_birth, gender, level, club, email, phone, notes, is_default, created_at, updated_at;
+					""",
+					*args,
+				)
+			else:
+				# Create new
+				row = await conn.fetchrow(
+					"""
+					INSERT INTO skaters (name, date_of_birth, gender, level, club, email, phone, notes, is_default)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+					RETURNING id, name, date_of_birth, gender, level, club, email, phone, notes, is_default, created_at, updated_at;
+					""",
+					name_str,
+					dob_date,
+					gender.strip() if gender else None,
+					level.strip() if level else None,
+					club.strip() if club else None,
+					email.strip() if email else None,
+					phone.strip() if phone else None,
+					notes.strip() if notes else None,
+					is_default or False,
+				)
 		if not row:
 			raise RuntimeError("Failed to upsert skater")
 		return skater_row_to_dict(row)

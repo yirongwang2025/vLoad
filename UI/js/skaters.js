@@ -52,12 +52,14 @@ function displaySkaters(skaters) {
         return '';
       }
       const details = [];
+      if (skater.is_default) details.push('Default');
       if (skater.level) details.push(`Level: ${escapeHtml(skater.level)}`);
       if (skater.club) details.push(`Club: ${escapeHtml(skater.club)}`);
       if (skater.date_of_birth) details.push(`DOB: ${escapeHtml(skater.date_of_birth.split('T')[0])}`);
       const sid = parseInt(skater.id);
+      const isDef = skater.is_default ? '1' : '0';
       return `
-        <div class="skater-item" data-skater-id="${sid}" data-skater-name="${escapeAttr(skater.name)}" data-skater-dob="${escapeAttr(skater.date_of_birth || '')}" data-skater-gender="${escapeAttr(skater.gender || '')}" data-skater-level="${escapeAttr(skater.level || '')}" data-skater-club="${escapeAttr(skater.club || '')}" data-skater-email="${escapeAttr(skater.email || '')}" data-skater-phone="${escapeAttr(skater.phone || '')}" data-skater-notes="${escapeAttr((skater.notes || '').replace(/'/g, "\\'"))}">
+        <div class="skater-item" data-skater-id="${sid}" data-skater-name="${escapeAttr(skater.name)}" data-skater-dob="${escapeAttr(skater.date_of_birth || '')}" data-skater-gender="${escapeAttr(skater.gender || '')}" data-skater-level="${escapeAttr(skater.level || '')}" data-skater-club="${escapeAttr(skater.club || '')}" data-skater-email="${escapeAttr(skater.email || '')}" data-skater-phone="${escapeAttr(skater.phone || '')}" data-skater-notes="${escapeAttr((skater.notes || '').replace(/'/g, "\\'"))}" data-skater-is-default="${isDef}">
           <div class="skater-header">
             <div>
               <div class="skater-name">${escapeHtml(skater.name)}</div>
@@ -91,7 +93,7 @@ function escapeAttr(s) {
     .replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function editSkater(id, name, dob, gender, level, club, email, phone, notes) {
+function editSkater(id, name, dob, gender, level, club, email, phone, notes, isDefault) {
   editingSkaterId = id;
   document.getElementById('skaterId').value = id;
   document.getElementById('skaterName').value = name;
@@ -102,6 +104,7 @@ function editSkater(id, name, dob, gender, level, club, email, phone, notes) {
   document.getElementById('email').value = email || '';
   document.getElementById('phone').value = phone || '';
   document.getElementById('notes').value = notes || '';
+  document.getElementById('isDefault').checked = !!isDefault;
   document.getElementById('formTitle').textContent = 'Edit Skater';
   document.getElementById('cancelBtn').classList.remove('hidden');
   document.getElementById('saveBtn').textContent = 'Update Skater';
@@ -126,6 +129,7 @@ async function saveSkater() {
   const email = document.getElementById('email').value.trim();
   const phone = document.getElementById('phone').value.trim();
   const notes = document.getElementById('notes').value.trim();
+  const isDefault = document.getElementById('isDefault') && document.getElementById('isDefault').checked;
   const id = document.getElementById('skaterId').value;
 
   if (!name) {
@@ -142,6 +146,7 @@ async function saveSkater() {
       level: level || null,
       club: club || null,
       email: email || null,
+      is_default: isDefault,
       phone: phone || null,
       notes: notes || null
     };
@@ -236,8 +241,9 @@ if (skaterListEl) {
     const email = item.getAttribute('data-skater-email') || '';
     const phone = item.getAttribute('data-skater-phone') || '';
     const notes = item.getAttribute('data-skater-notes') || '';
+    const isDefault = item.getAttribute('data-skater-is-default') === '1';
     const action = btn.getAttribute('data-action');
-    if (action === 'edit') editSkater(id, name, dob, gender, level, club, email, phone, notes);
+    if (action === 'edit') editSkater(id, name, dob, gender, level, club, email, phone, notes, isDefault);
     else if (action === 'relationships') openRelationshipModal(id, name);
     else if (action === 'delete') deleteSkater(id, name);
   });

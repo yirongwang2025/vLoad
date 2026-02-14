@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import time
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -239,7 +242,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 	except KeyboardInterrupt:
 		return 0
 	except Exception as e:
-		print(f"[jump_clip_worker] fatal: {e!r}")
+		logger.exception("[jump_clip_worker] fatal: %s", e)
 		return 2
 
 

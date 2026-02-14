@@ -69,6 +69,7 @@ class AppState:
 	frame_sync_task: Any = None
 	clip_worker_proc: Any = None
 	video_proc: Any = None
+	auto_connect_task: Any = None
 
 	# Rolling receive-rate window (server-side)
 	imu_rx_window: Optional[Deque[Tuple[float, int]]] = None

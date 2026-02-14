@@ -74,28 +74,28 @@
         }, WS_PING_EVERY_MS);
       }
 
-      // Light heartbeat in the log.
-      if (!_hbTimer) {
-        _hbTimer = setInterval(() => {
-          const now = Date.now();
-          const dtMs = _hbLastMs == null ? null : (now - _hbLastMs);
-          _hbLastMs = now;
-          const wsState = wsStateLabel(ws);
-          const sinceWs = _lastWsMsgMs ? (now - _lastWsMsgMs) : null;
-          const sinceImu = _lastImuMsgMs ? (now - _lastImuMsgMs) : null;
-          const dMsgs = _imuMsgCount - _hbLastImuMsgCount;
-          const dSamp = _imuSampleCount - _hbLastImuSampleCount;
-          _hbLastImuMsgCount = _imuMsgCount;
-          _hbLastImuSampleCount = _imuSampleCount;
-          const wsPart = sinceWs == null ? 'ws_rx=never' : `ws_rx=${(sinceWs/1000).toFixed(1)}s ago`;
-          const imuPart = sinceImu == null ? 'imu_rx=never' : `imu_rx=${(sinceImu/1000).toFixed(1)}s ago`;
-          const dtPart = dtMs == null ? 'dt=?' : `dt=${(dtMs/1000).toFixed(2)}s`;
-          const sampHz = dtMs == null || dtMs <= 0 ? null : (dSamp * 1000.0 / dtMs);
-          const msgHz = dtMs == null || dtMs <= 0 ? null : (dMsgs * 1000.0 / dtMs);
-          const ratePart = sampHz == null ? '' : `, imu_rate≈${sampHz.toFixed(1)}Hz, imu_msg_rate≈${msgHz.toFixed(1)}/s`;
-          addLog(`[HB] ws=${wsState}, ${wsPart}, ${imuPart}, ${dtPart}, imu_msgs+${dMsgs}, imu_samples+${dSamp}${ratePart}`);
-        }, HEARTBEAT_EVERY_MS);
-      }
+      // Light heartbeat in the log (commented out to reduce log noise; re-enable for debugging).
+      // if (!_hbTimer) {
+      //   _hbTimer = setInterval(() => {
+      //     const now = Date.now();
+      //     const dtMs = _hbLastMs == null ? null : (now - _hbLastMs);
+      //     _hbLastMs = now;
+      //     const wsState = wsStateLabel(ws);
+      //     const sinceWs = _lastWsMsgMs ? (now - _lastWsMsgMs) : null;
+      //     const sinceImu = _lastImuMsgMs ? (now - _lastImuMsgMs) : null;
+      //     const dMsgs = _imuMsgCount - _hbLastImuMsgCount;
+      //     const dSamp = _imuSampleCount - _hbLastImuSampleCount;
+      //     _hbLastImuMsgCount = _imuMsgCount;
+      //     _hbLastImuSampleCount = _imuSampleCount;
+      //     const wsPart = sinceWs == null ? 'ws_rx=never' : `ws_rx=${(sinceWs/1000).toFixed(1)}s ago`;
+      //     const imuPart = sinceImu == null ? 'imu_rx=never' : `imu_rx=${(sinceImu/1000).toFixed(1)}s ago`;
+      //     const dtPart = dtMs == null ? 'dt=?' : `dt=${(dtMs/1000).toFixed(2)}s`;
+      //     const sampHz = dtMs == null || dtMs <= 0 ? null : (dSamp * 1000.0 / dtMs);
+      //     const msgHz = dtMs == null || dtMs <= 0 ? null : (dMsgs * 1000.0 / dtMs);
+      //     const ratePart = sampHz == null ? '' : `, imu_rate≈${sampHz.toFixed(1)}Hz, imu_msg_rate≈${msgHz.toFixed(1)}/s`;
+      //     addLog(`[HB] ws=${wsState}, ${wsPart}, ${imuPart}, ${dtPart}, imu_msgs+${dMsgs}, imu_samples+${dSamp}${ratePart}`);
+      //   }, HEARTBEAT_EVERY_MS);
+      // }
     }
 
     function scheduleWsReconnect() {
@@ -466,10 +466,10 @@
         parts.push('Video: Not Available');
       }
       connectionStatus.textContent = parts.join(', ');
-      if (imuConnected && videoConnected) {
-        connectionStatus.style.color = '#388e3c'; // Green - both connected
-      } else if (imuConnected || videoConnected) {
-        connectionStatus.style.color = '#f57c00'; // Orange - partial connection
+      if (videoConnected) {
+        connectionStatus.style.color = '#388e3c'; // Green - video connected (with or without IMU)
+      } else if (imuConnected) {
+        connectionStatus.style.color = '#f57c00'; // Orange - IMU only
       } else {
         connectionStatus.style.color = '#d32f2f'; // Red - neither connected
       }
@@ -687,6 +687,9 @@
               
               // Update video connection status
               videoConnected = cur.running;
+              if (cur.running && refs.videoFeed && refs.videoFeed.src.indexOf('/video/mjpeg') === -1) {
+                refs.videoFeed.src = '/video/mjpeg?fps=10&ts=' + Date.now();
+              }
               updateConnectionStatus();
       
               // Host-time only: show latest frame timestamp if available.

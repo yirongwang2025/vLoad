@@ -55,6 +55,7 @@ from modules.db.devices import (
 from modules.db.skaters import (
 	list_skaters,
 	get_skater_by_id,
+	get_default_skater,
 	upsert_skater,
 	delete_skater,
 	get_skater_coaches,
@@ -115,6 +116,7 @@ __all__ = [
 	"resolve_device_identifier",
 	"list_skaters",
 	"get_skater_by_id",
+	"get_default_skater",
 	"upsert_skater",
 	"delete_skater",
 	"get_skater_coaches",

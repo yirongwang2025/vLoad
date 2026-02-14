@@ -111,15 +111,6 @@ async def pose_run_for_jump_by_event_id(event_id: int, payload: Dict[str, Any] =
 @router.get("/db/jumps/{jump_id}")
 async def db_get_jump(jump_id: int):
 	"""Fetch one jump + IMU samples by jumps.id (jump_id). Canonical route."""
-	# #region agent log
-	import json, os
-	_logpath = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cursor", "debug.log")
-	try:
-		with open(_logpath, "a", encoding="utf-8") as _f:
-			_f.write(json.dumps({"location": "api_jumps:db_get_jump", "jump_id": int(jump_id), "message": "GET hit"}) + "\n")
-	except Exception:
-		pass
-	# #endregion
 	try:
 		row = await db.get_jump_with_imu_by_jump_id(int(jump_id))
 		if not row:

@@ -1,8 +1,11 @@
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
+
+logger = logging.getLogger(__name__)
 import bisect
 import subprocess
 from collections import deque
@@ -261,6 +264,122 @@ FRAME_HISTORY_MAX_SECONDS: float = 120.0
 _app_state: Optional[AppState] = None
 
 
+async def _do_connect_imu_for_skater(st: AppState, skater_id: int) -> bool:
+	"""Start IMU collector for the given skater. Returns True if started, False on error."""
+	try:
+		skater_devices = await db.get_skater_devices(int(skater_id))
+		if not skater_devices:
+			return False
+		waist_device = next((d for d in skater_devices if d.get("placement") == "waist"), None)
+		selected_device = waist_device or skater_devices[0]
+		device = selected_device.get("mac_address")
+		if not device:
+			return False
+		resolved_mac = await db.resolve_device_identifier(device)
+		if resolved_mac:
+			device = resolved_mac
+		if st.imu_proc is not None:
+			try:
+				st.imu_proc.terminate()
+			except Exception:
+				pass
+			try:
+				st.imu_proc.wait(timeout=3)
+			except Exception:
+				pass
+			st.imu_proc = None
+		cmd = [
+			sys.executable,
+			"-m",
+			"modules.imu_collector",
+			"--device",
+			device,
+			"--mode",
+			MODE,
+			"--rate",
+			str(RATE),
+			"--udp-host",
+			IMU_UDP_HOST,
+			"--udp-port",
+			str(IMU_UDP_PORT),
+		]
+		st.imu_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		try:
+			st.dbg["collector_running"] = True
+			st.dbg["collector_pid"] = int(st.imu_proc.pid) if st.imu_proc.pid else None
+		except Exception:
+			pass
+		if st.log_to_clients:
+			st.log_to_clients(f"[AutoConnect] Started IMU collector for skater {skater_id} (device={device})")
+		return True
+	except Exception:
+		return False
+
+
+async def _auto_connect_loop(st: AppState) -> None:
+	"""
+	On startup: if a default skater exists, auto-connect video and IMU independently.
+	- Video: connect once (even if IMU is unavailable).
+	- IMU: if default skater has a device, try to connect; retry every imu_retry_interval_seconds until connected.
+	"""
+	retry_sec = max(1.0, float(CFG.auto_connect.imu_retry_interval_seconds))
+	skater = await db.get_default_skater()
+	if not skater or not skater.get("id"):
+		return
+	skater_id = int(skater["id"])
+
+	# Connect video independently (do not block on IMU)
+	try:
+		st.video.start()
+		if st.log_to_clients:
+			st.log_to_clients("[AutoConnect] Video started")
+	except Exception as e:
+		if st.log_to_clients:
+			st.log_to_clients(f"[AutoConnect] Video start failed: {e!r}")
+
+	# IMU: only if default skater has a device
+	devices = await db.get_skater_devices(skater_id)
+	if not devices:
+		if st.log_to_clients:
+			st.log_to_clients("[AutoConnect] Default skater has no IMU device; video only")
+		return
+
+	while True:
+		try:
+			ok = await _do_connect_imu_for_skater(st, skater_id)
+			if not ok:
+				if st.log_to_clients:
+					st.log_to_clients(f"[AutoConnect] Failed to start IMU collector; retrying in {retry_sec:.0f}s")
+				await asyncio.sleep(retry_sec)
+				continue
+			await asyncio.sleep(retry_sec)
+			last_t = st.dbg.get("last_imu_t")
+			hist_len = len(st.imu_history) if st.imu_history else 0
+			if (last_t is not None and last_t > 0) or hist_len > 0:
+				if st.log_to_clients:
+					st.log_to_clients("[AutoConnect] IMU connected successfully")
+				break
+			if st.log_to_clients:
+				st.log_to_clients(f"[AutoConnect] No IMU data yet; retrying in {retry_sec:.0f}s...")
+			if st.imu_proc is not None:
+				try:
+					st.imu_proc.terminate()
+				except Exception:
+					pass
+				try:
+					st.imu_proc.wait(timeout=3)
+				except Exception:
+					pass
+				st.imu_proc = None
+			await asyncio.sleep(retry_sec)
+		except asyncio.CancelledError:
+			break
+		except Exception as e:
+			if st.log_to_clients:
+				st.log_to_clients(f"[AutoConnect] Error: {e!r}")
+			await asyncio.sleep(retry_sec)
+
+
 def _jump_log_filter(message: str) -> None:
 	"""
 	Filter JumpDetector log lines before sending them to clients.
@@ -283,7 +402,7 @@ async def lifespan(app: FastAPI):
 			await db.init_db()
 		except Exception as e:
 			# DB is optional; log to clients and continue without persistence.
-			print(f"[DB] init_db failed: {e!r}")
+			logger.error("[DB] init_db failed: %s", e)
 			# We deliberately don't call _log_to_clients here because WS manager
 			# may not be ready yet.
 
@@ -548,6 +667,9 @@ async def lifespan(app: FastAPI):
 			app_state.clip_worker_proc = None
 			app_state.dbg["clip_worker_pid"] = None
 
+		# Auto-connect: if default skater has IMU device, connect IMU and video; retry every 10s until IMU data arrives.
+		app_state.auto_connect_task = asyncio.create_task(_auto_connect_loop(app_state))
+
 		# Optionally start a dedicated video collector process (keeps camera/GPU code isolated).
 		try:
 			app_state.video_proc = start_video_collector_subprocess(CFG)
@@ -562,6 +684,24 @@ async def lifespan(app: FastAPI):
 		st_clean = _app_state
 		if st_clean is None:
 			return
+		# Cancel auto-connect task
+		if st_clean.auto_connect_task:
+			st_clean.auto_connect_task.cancel()
+			try:
+				await st_clean.auto_connect_task
+			except asyncio.CancelledError:
+				pass
+			except Exception:
+				pass
+		st_clean.auto_connect_task = None
+
+		# Stop video backend (release camera)
+		try:
+			if st_clean.video:
+				st_clean.video.stop()
+		except Exception:
+			pass
+
 		# Stop optional video collector process
 		if st_clean.video_proc is not None:
 			try:
@@ -1013,7 +1153,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 						except Exception as e:
 							st_arg.dbg["db_last_insert_error"] = repr(e)
 							st_arg.log_to_clients(f"[DB] insert_jump_with_imu failed for event_id={event_id_arg}: {e!r}")
-							print(f"[DB] insert_jump_with_imu failed for event_id={event_id_arg}: {e!r}")
+							logger.error("[DB] insert_jump_with_imu failed for event_id=%s: %s", event_id_arg, e)
 							return
 
 						# Enqueue clip generation job. This runs out-of-process and may complete later
@@ -1071,7 +1211,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 					)
 				except Exception as e:
 					# DB persistence is best‑effort; ignore errors here.
-					print(f"[DB] Error scheduling insert_jump_with_imu: {e!r}")
+					logger.error("[DB] Error scheduling insert_jump_with_imu: %s", e)
 			except Exception:
 				# Jump notifications are best‑effort; ignore errors.
 				pass
@@ -1439,12 +1579,12 @@ async def start_jump_detection(state: AppState = Depends(get_state)):
 		except HTTPException as e:
 			state.detection_session_id = None
 			state.log_to_clients(f"[Session] Auto-start for detection failed: {e.detail}")
-			print(f"[Session] Auto-start for detection failed: {e.detail}")
+			logger.error("[Session] Auto-start for detection failed: %s", e.detail)
 			raise
 		except Exception as e:
 			state.detection_session_id = None
 			state.log_to_clients(f"[Session] Auto-start for detection failed: {e!r}")
-			print(f"[Session] Auto-start for detection failed: {e!r}")
+			logger.error("[Session] Auto-start for detection failed: %s", e)
 			raise HTTPException(status_code=500, detail=f"Auto-start recording failed: {e!r}")
 
 	return {"detail": "Jump detection enabled (recording auto-started).", "session_id": state.detection_session_id}
@@ -1639,13 +1779,3 @@ async def export_imu(seconds: float = 30.0, mode: str = "raw", state: AppState =
 	# Default: raw export of recent IMU samples.
 	samples = [row for row in history_snapshot if float(row.get("t", 0.0)) >= cutoff]
 	return {"mode": "raw", "seconds": seconds, "count": len(samples), "samples": samples}
-
-
-async def ble_worker(device: Optional[str], mode: str, rate: int) -> None:
-	"""
-	Deprecated: we now run BLE acquisition in a separate process (`modules.imu_collector`)
-	and ingest IMU samples over localhost UDP in the server.
-
-	This function is kept as a stub to avoid breaking older imports/scripts.
-	"""
-	raise RuntimeError("ble_worker is deprecated; use the IMU collector process.")

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import socket
-import sys
 import time
+
+logger = logging.getLogger(__name__)
 from collections import deque
 from typing import Any, Dict, Optional, Tuple
 
@@ -328,7 +330,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 	except KeyboardInterrupt:
 		return 0
 	except Exception as e:
-		print(f"[Collector] fatal: {e!r}", file=sys.stderr)
+		logger.exception("[Collector] fatal: %s", e)
 		return 2
 
 

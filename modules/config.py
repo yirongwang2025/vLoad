@@ -28,6 +28,12 @@ class ImuUdpConfig:
 
 
 @dataclass(frozen=True)
+class AutoConnectConfig:
+	# Seconds between IMU connection retries when default skater has device but IMU is not yet connected.
+	imu_retry_interval_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
 class JobsConfig:
 	jump_clip_jobs_dir: str = str(Path("data") / "jobs" / "jump_clips")
 
@@ -92,6 +98,7 @@ class AppConfig:
 	database: DatabaseConfig = field(default_factory=DatabaseConfig)
 	movesense: MovesenseConfig = field(default_factory=MovesenseConfig)
 	imu_udp: ImuUdpConfig = field(default_factory=ImuUdpConfig)
+	auto_connect: AutoConnectConfig = field(default_factory=AutoConnectConfig)
 	jobs: JobsConfig = field(default_factory=JobsConfig)
 	sessions: SessionsConfig = field(default_factory=SessionsConfig)
 	video: VideoConfig = field(default_factory=VideoConfig)
@@ -200,6 +207,9 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
 	udp_host = _as_str(_deep_get(raw, ["imu_udp", "host"], "127.0.0.1"), "127.0.0.1")
 	udp_port = _as_int(_deep_get(raw, ["imu_udp", "port"], 9999), 9999)
 
+	imu_retry_sec = _as_float(_deep_get(raw, ["auto_connect", "imu_retry_interval_seconds"], 15.0), 15.0)
+	imu_retry_sec = max(1.0, float(imu_retry_sec))
+
 	jobs_dir = _as_str(_deep_get(raw, ["jobs", "jump_clip_jobs_dir"], str(Path("data") / "jobs" / "jump_clips")), "")
 
 	sessions_base_dir = _as_str(_deep_get(raw, ["sessions", "base_dir"], str(Path("data") / "sessions")), "")
@@ -230,6 +240,7 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
 			ble_adapter=m_ble_adapter,
 		),
 		imu_udp=ImuUdpConfig(host=udp_host, port=int(udp_port) if int(udp_port) > 0 else 9999),
+		auto_connect=AutoConnectConfig(imu_retry_interval_seconds=float(imu_retry_sec)),
 		jobs=JobsConfig(jump_clip_jobs_dir=jobs_dir),
 		sessions=SessionsConfig(base_dir=sessions_base_dir, jump_clips_subdir=jump_clips_subdir),
 		video=VideoConfig(

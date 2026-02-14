@@ -1,10 +1,13 @@
 """Jumps, jump_frames, imu_samples, annotations."""
+import logging
 import math
 import statistics
 from typing import Any, Dict, List, Optional, Sequence
 
 from modules.db.helpers import frame_row_to_dict, imu_sample_row_to_dict, jump_row_to_dict
 from modules.db.pool import get_pool, _to_dt
+
+logger = logging.getLogger(__name__)
 
 async def replace_jump_frames(jump_id: int, frames: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 	"""
@@ -13,7 +16,7 @@ async def replace_jump_frames(jump_id: int, frames: Sequence[Dict[str, Any]]) ->
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] replace_jump_frames: pool is None, skipping")
+		logger.debug("[DB] replace_jump_frames: pool is None, skipping")
 		return {"inserted": 0}
 	jid = int(jump_id)
 	async with pool.acquire() as conn:
@@ -85,9 +88,9 @@ async def insert_jump_with_imu(
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] insert_jump_with_imu: pool is None, skipping")
+		logger.debug("[DB] insert_jump_with_imu: pool is None, skipping")
 		return None
-	print(f"[DB] insert_jump_with_imu: session_id={jump.get('session_id')}, event_id={jump.get('event_id')}, samples={len(imu_samples)}")
+	logger.debug("[DB] insert_jump_with_imu: session_id=%s, event_id=%s, samples=%s", jump.get("session_id"), jump.get("event_id"), len(imu_samples))
 
 	event_id = int(jump.get("event_id", 0)) or None
 	session_id = jump.get("session_id")
@@ -297,9 +300,9 @@ async def update_annotation(event_id: int, name: Optional[str], note: Optional[s
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] update_annotation: pool is None, skipping")
+		logger.debug("[DB] update_annotation: pool is None, skipping")
 		return
-	print(f"[DB] update_annotation: event_id={event_id}, name={name!r}")
+	logger.debug("[DB] update_annotation: event_id=%s, name=%r", event_id, name)
 
 	async with pool.acquire() as conn:
 		await conn.execute(
@@ -323,10 +326,10 @@ async def update_annotation_by_jump_id(jump_id: int, name: Optional[str], note: 
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] update_annotation_by_jump_id: pool is None, skipping")
+		logger.debug("[DB] update_annotation_by_jump_id: pool is None, skipping")
 		return
 	jid = int(jump_id)
-	print(f"[DB] update_annotation_by_jump_id: jump_id={jid}, name={name!r}")
+	logger.debug("[DB] update_annotation_by_jump_id: jump_id=%s, name=%r", jid, name)
 
 	async with pool.acquire() as conn:
 		await conn.execute(
@@ -912,20 +915,7 @@ async def list_jumps(limit: int = 200) -> List[Dict[str, Any]]:
 	"""
 	Return recent jumps ordered by t_peak DESC (detection time).
 	"""
-	# #region agent log
-	import json, os
-	_logpath = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".cursor", "debug.log")
-	def _log(o):
-		try:
-			with open(_logpath, "a", encoding="utf-8") as _f:
-				_f.write(json.dumps(o) + "\n")
-		except Exception:
-			pass
-	# #endregion
 	pool = get_pool()
-	# #region agent log
-	_log({"location": "jumps.py:list_jumps:pool", "message": "pool check", "data": {"pool_is_none": pool is None}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3"})
-	# #endregion
 	if pool is None:
 		return []
 	lim = max(1, min(int(limit), 1000))
@@ -948,9 +938,6 @@ async def list_jumps(limit: int = 200) -> List[Dict[str, Any]]:
 			lim,
 		)
 	out = [jump_row_to_dict(r, include_extra=False) for r in rows]
-	# #region agent log
-	_log({"location": "jumps.py:list_jumps:return", "message": "list_jumps return", "data": {"count": len(out)}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3"})
-	# #endregion
 	return out
 
 
@@ -1175,7 +1162,7 @@ async def delete_jump(event_id: int) -> Dict[str, Any]:
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] delete_jump: pool is None, skipping")
+		logger.debug("[DB] delete_jump: pool is None, skipping")
 		return {"deleted": False, "detail": "DB not configured"}
 
 	eid = int(event_id)
@@ -1220,7 +1207,7 @@ async def delete_jump_by_jump_id(jump_id: int) -> Dict[str, Any]:
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] delete_jump_by_jump_id: pool is None, skipping")
+		logger.debug("[DB] delete_jump_by_jump_id: pool is None, skipping")
 		return {"deleted": False, "detail": "DB not configured"}
 	jid = int(jump_id)
 	async with pool.acquire() as conn:
@@ -1265,7 +1252,7 @@ async def delete_jumps_bulk(jump_ids: List[int]) -> Dict[str, Any]:
 	"""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] delete_jumps_bulk: pool is None, skipping")
+		logger.debug("[DB] delete_jumps_bulk: pool is None, skipping")
 		return {"deleted_count": 0, "detail": "DB not configured"}
 	
 	if not jump_ids:

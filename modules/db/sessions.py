@@ -1,7 +1,10 @@
 """Sessions and frames: upsert_session_start, update_session_stop, replace_frames, get_frames."""
+import logging
 from typing import Any, Dict, List, Optional, Sequence
 
 from modules.db.pool import get_pool, _to_dt
+
+logger = logging.getLogger(__name__)
 
 
 async def upsert_session_start(
@@ -19,7 +22,7 @@ async def upsert_session_start(
 	"""Create/update a session row at session start."""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] upsert_session_start: _pool is None, skipping")
+		logger.debug("[DB] upsert_session_start: pool is None, skipping")
 		return
 	sid = (session_id or "").strip()
 	if not sid:
@@ -57,7 +60,7 @@ async def update_session_stop(session_id: str, t_stop: float, video_path: Option
 	"""Update t_stop and optionally video_path/meta for a session."""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] update_session_stop: _pool is None, skipping")
+		logger.debug("[DB] update_session_stop: pool is None, skipping")
 		return
 	sid = (session_id or "").strip()
 	if not sid:
@@ -102,7 +105,7 @@ async def replace_frames(session_id: str, frames: Sequence[Dict[str, Any]]) -> D
 	"""Replace all frames for a session (delete then bulk insert)."""
 	pool = get_pool()
 	if pool is None:
-		print("[DB] replace_frames: _pool is None, skipping")
+		logger.debug("[DB] replace_frames: pool is None, skipping")
 		return {"inserted": 0}
 	sid = (session_id or "").strip()
 	if not sid:

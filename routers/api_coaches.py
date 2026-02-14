@@ -1,10 +1,12 @@
 """Coach API and skater–coach link routes. Routes: /api/coaches*, /api/skaters/*/coaches, /api/skaters/*/devices, /api/coaches/*/skaters."""
+import logging
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 
 from modules import db
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api_coaches"])
 
 
@@ -17,7 +19,7 @@ async def list_coaches_endpoint():
 			coaches = []
 		return {"coaches": coaches}
 	except Exception as e:
-		print(f"[Coaches] Error listing coaches: {e!r}")
+		logger.error("[Coaches] Error listing coaches: %s", e)
 		return {"coaches": []}
 
 

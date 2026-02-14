@@ -102,6 +102,7 @@ def skater_row_to_dict(row: Record) -> Dict[str, Any]:
 		"email": _opt_str(row, "email"),
 		"phone": _opt_str(row, "phone"),
 		"notes": _opt_str(row, "notes"),
+		"is_default": _opt_bool(row, "is_default") or False,
 		"created_at": _iso(row.get("created_at")),
 		"updated_at": _iso(row.get("updated_at")),
 	}
