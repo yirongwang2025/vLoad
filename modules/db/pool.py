@@ -43,7 +43,12 @@ async def init_db() -> None:
 	async with _init_lock:
 		if _pool is None:
 			try:
-				_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+				cfg = get_config()
+				_pool = await asyncpg.create_pool(
+					dsn,
+					min_size=max(1, int(cfg.database.pool_min_size)),
+					max_size=max(max(1, int(cfg.database.pool_min_size)), int(cfg.database.pool_max_size)),
+				)
 				_last_init_error = None
 			except Exception as e:
 				_last_init_error = repr(e)

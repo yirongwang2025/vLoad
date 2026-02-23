@@ -66,8 +66,8 @@ def get_video_backend(cfg: Optional[AppConfig] = None, *, backend_override: Opti
 	if use_proc:
 		from modules.video_backends.http_proxy_backend import HttpProxyVideoBackend
 
-		host = cfg.video.process.collector_host or "127.0.0.1"
-		port = int(cfg.video.process.collector_port or 18081)
+		host = cfg.video.process.collector_host
+		port = int(cfg.video.process.collector_port)
 		return HttpProxyVideoBackend(f"http://{host}:{port}")
 
 	if backend in ("picamera2", "pc2"):
@@ -129,8 +129,8 @@ def start_video_collector_subprocess(cfg: Optional[AppConfig] = None) -> Optiona
 		return None
 	import subprocess
 
-	port = int(cfg.video.process.collector_port or 18081)
-	host = cfg.video.process.collector_host or "127.0.0.1"
+	port = int(cfg.video.process.collector_port)
+	host = cfg.video.process.collector_host
 	backend = (cfg.video.backend or "picamera2").strip().lower()
 	cmd = [sys.executable, "-m", "modules.video_collector", "--host", str(host), "--port", str(port), "--backend", backend]
 	try:
@@ -150,9 +150,9 @@ async def mjpeg_from_latest(get_latest_jpeg_fn, fps: float) -> AsyncIterator[byt
 	try:
 		max_fps = float(fps)
 	except Exception:
-		max_fps = 15.0
+		max_fps = float(get_config().video.default_mjpeg_fps)
 	if not (max_fps > 0.0):
-		max_fps = 15.0
+		max_fps = float(get_config().video.default_mjpeg_fps)
 	min_interval = 1.0 / max_fps
 
 	while True:

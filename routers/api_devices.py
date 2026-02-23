@@ -5,10 +5,12 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 
 from modules import db
+from modules.config import get_config
 from modules.movesense_gatt import MovesenseGATTClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api_devices"])
+CFG = get_config()
 
 
 @router.get("/scan")
@@ -18,7 +20,7 @@ async def scan_devices():
 	"""
 	devices = [
 		{"address": addr, "name": name}
-		async for addr, name in MovesenseGATTClient.scan_for_movesense(timeout=7.0)
+		async for addr, name in MovesenseGATTClient.scan_for_movesense(timeout=float(CFG.ble.scan_timeout_seconds))
 	]
 	return {"devices": devices}
 

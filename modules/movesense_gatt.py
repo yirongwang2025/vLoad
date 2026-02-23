@@ -7,6 +7,7 @@ from typing import Callable, Optional, Iterable, Tuple, Dict, Any
 from bleak import BleakScanner, BleakClient, BleakError
 
 import struct
+from modules.config import get_config
 
 # Movesense GATT SensorData Protocol (GSP)
 # Service and characteristic UUIDs (public, stable)
@@ -89,11 +90,13 @@ class MovesenseGATTClient:
 	# Discovery / connection helpers
 	# -------------------------------
 	@staticmethod
-	async def scan_for_movesense(timeout: float = 5.0) -> Iterable[Tuple[str, str]]:
+	async def scan_for_movesense(timeout: Optional[float] = None) -> Iterable[Tuple[str, str]]:
 		"""
 		Scan for nearby Movesense devices and yield (address, name).
 		Compatible across Bleak versions and backends.
 		"""
+		if timeout is None:
+			timeout = float(get_config().ble.scan_timeout_seconds)
 		found_any = False
 		
 		# Try Bleak's return_adv mode (varies by version/OS)
@@ -182,7 +185,7 @@ class MovesenseGATTClient:
 				logging.debug(f"  -> Match! Yielding Movesense device")
 				yield d.address, (name or d.address)
 
-	async def scan_for_movesense_on_adapter(self, timeout: float = 5.0) -> Iterable[Tuple[str, str]]:
+	async def scan_for_movesense_on_adapter(self, timeout: Optional[float] = None) -> Iterable[Tuple[str, str]]:
 		"""
 		Same as scan_for_movesense(), but attempts to scope scanning to a specific
 		BlueZ adapter (Linux) if self._adapter is set.
@@ -190,6 +193,8 @@ class MovesenseGATTClient:
 		This method is defensive across Bleak versions; if the backend doesn't
 		accept adapter scoping, it falls back to a normal scan.
 		"""
+		if timeout is None:
+			timeout = float(get_config().ble.scan_timeout_seconds)
 		if not self._adapter:
 			async for item in self.scan_for_movesense(timeout=timeout):
 				yield item
@@ -265,27 +270,38 @@ class MovesenseGATTClient:
 		address_or_name = (address_or_name or "").strip()
 		target_address = address_or_name
 		ble_device = None
+		ble_cfg = get_config().ble
 
 		if ":" in address_or_name:
 			# Resolve MAC by scanning to populate BlueZ cache
 			self._log(f"Attempting MAC-based connect to '{address_or_name}'...")
 			try:
 				if self._adapter:
-					ble_device = await BleakScanner.find_device_by_address(address_or_name, timeout=10.0, adapter=self._adapter)  # type: ignore[call-arg]
+					ble_device = await BleakScanner.find_device_by_address(
+						address_or_name,
+						timeout=float(ble_cfg.connect_find_timeout_seconds),
+						adapter=self._adapter,
+					)  # type: ignore[call-arg]
 				else:
-					ble_device = await BleakScanner.find_device_by_address(address_or_name, timeout=10.0)
+					ble_device = await BleakScanner.find_device_by_address(
+						address_or_name,
+						timeout=float(ble_cfg.connect_find_timeout_seconds),
+					)
 			except Exception:
 				ble_device = None
 			if ble_device is None:
 				self._log("Direct find_device_by_address failed; falling back to discovery scan.")
 				try:
 					if self._adapter:
-						devices = await BleakScanner.discover(timeout=7.0, adapter=self._adapter)  # type: ignore[call-arg]
+						devices = await BleakScanner.discover(
+							timeout=float(ble_cfg.connect_discovery_timeout_seconds),
+							adapter=self._adapter,
+						)  # type: ignore[call-arg]
 					else:
-						devices = await BleakScanner.discover(timeout=7.0)
+						devices = await BleakScanner.discover(timeout=float(ble_cfg.connect_discovery_timeout_seconds))
 				except TypeError:
 					# Bleak backend doesn't accept adapter kwarg
-					devices = await BleakScanner.discover(timeout=7.0)
+					devices = await BleakScanner.discover(timeout=float(ble_cfg.connect_discovery_timeout_seconds))
 				for d in devices:
 					if d.address.replace("-", ":").lower() == address_or_name.lower():
 						self._log(f"Matched address via discovery: {d.address}")
@@ -295,30 +311,51 @@ class MovesenseGATTClient:
 				if ble_device is None:
 					# As a final fallback, scan for any Movesense device and connect to it.
 					self._log("MAC not found; scanning for any Movesense device as fallback.")
-					found = [item async for item in self.scan_for_movesense_on_adapter(timeout=7.0)]
+					found = [
+						item
+						async for item in self.scan_for_movesense_on_adapter(
+							timeout=float(ble_cfg.connect_fallback_scan_timeout_seconds)
+						)
+					]
 					if found:
 						addr, name = found[0]
 						self._log(f"Found Movesense '{name}' at {addr}; connecting to it.")
 						target_address = addr
 						try:
 							if self._adapter:
-								ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0, adapter=self._adapter)  # type: ignore[call-arg]
+								ble_device = await BleakScanner.find_device_by_address(
+									addr,
+									timeout=float(ble_cfg.connect_refind_timeout_seconds),
+									adapter=self._adapter,
+								)  # type: ignore[call-arg]
 							else:
-								ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
+								ble_device = await BleakScanner.find_device_by_address(
+									addr,
+									timeout=float(ble_cfg.connect_refind_timeout_seconds),
+								)
 						except Exception:
 							ble_device = None
 					if ble_device is None:
 						raise BleakError(f"Device with address {address_or_name} was not found. Ensure it is advertising and nearby.")
 		else:
 			self._log(f"Scanning for device named '{address_or_name}'...")
-			async for addr, name in self.scan_for_movesense_on_adapter(timeout=7.0):
+			async for addr, name in self.scan_for_movesense_on_adapter(
+				timeout=float(ble_cfg.connect_fallback_scan_timeout_seconds)
+			):
 				if name.strip().lower() == address_or_name.strip().lower():
 					target_address = addr
 					try:
 						if self._adapter:
-							ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0, adapter=self._adapter)  # type: ignore[call-arg]
+							ble_device = await BleakScanner.find_device_by_address(
+								addr,
+								timeout=float(ble_cfg.connect_refind_timeout_seconds),
+								adapter=self._adapter,
+							)  # type: ignore[call-arg]
 						else:
-							ble_device = await BleakScanner.find_device_by_address(addr, timeout=5.0)
+							ble_device = await BleakScanner.find_device_by_address(
+								addr,
+								timeout=float(ble_cfg.connect_refind_timeout_seconds),
+							)
 					except Exception:
 						ble_device = None
 					break

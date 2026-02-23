@@ -8,8 +8,10 @@ from fastapi.responses import HTMLResponse
 from app_state import AppState
 from deps import get_state
 from modules import db
+from modules.config import get_config
 
 router = APIRouter(tags=["pages"])
+CFG = get_config()
 
 
 def _get_html(state: AppState, filename: str) -> str:
@@ -113,14 +115,14 @@ async def _jumps_page_html(state: AppState):
 	if not placeholder_present:
 		return html
 	try:
-		jumps_list = await db.list_jumps(limit=200)
+		jumps_list = await db.list_jumps(limit=int(CFG.api.pages_jumps_preload_limit))
 		if not isinstance(jumps_list, list):
 			jumps_list = []
 		# Server-render list items so list shows even if script/fetch fails (same pattern as Connect skater options)
 		if _JUMP_LIST_ITEMS_PLACEHOLDER in html:
 			from datetime import datetime
 			items_html_parts = []
-			for j in jumps_list[:200]:
+			for j in jumps_list[: int(CFG.api.pages_jumps_preload_limit)]:
 				jid = j.get("jump_id") or j.get("id")
 				if jid is None:
 					continue

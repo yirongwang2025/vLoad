@@ -5,18 +5,12 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 
 from modules import db
+from modules.config import get_jump_detection_defaults
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api_skaters"])
 
-JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
-	"min_jump_height_m": 0.15,
-	"min_jump_peak_az_no_g": 3.5,
-	"min_jump_peak_gz_deg_s": 180.0,
-	"min_new_event_separation_s": 0.5,
-	"analysis_interval_s": 0.5,
-	"min_revs": 0.0,
-}
+JUMP_CONFIG_DEFAULTS: Dict[str, float] = get_jump_detection_defaults()
 
 
 @router.get("/api/skaters")

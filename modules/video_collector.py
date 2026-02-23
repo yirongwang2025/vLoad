@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Optional
 
-from modules.config import set_config_path
+from modules.config import get_config, set_config_path
 from modules.video_backend import get_video_backend
 
 
@@ -58,12 +58,12 @@ class Handler(BaseHTTPRequestHandler):
 
 		if self.path.startswith("/mjpeg"):
 			# parse fps query param (very lightweight parsing)
-			fps = 15.0
+			fps = float(get_config().video.default_mjpeg_fps)
 			try:
 				if "fps=" in self.path:
 					fps = float(self.path.split("fps=", 1)[1].split("&", 1)[0])
 			except Exception:
-				fps = 15.0
+				fps = float(get_config().video.default_mjpeg_fps)
 
 			self.send_response(200)
 			self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -125,7 +125,7 @@ class Handler(BaseHTTPRequestHandler):
 		if self.path.startswith("/record/start"):
 			# expected query params: session_dir and fps
 			session_dir = ""
-			fps = 30
+			fps = int(get_config().video.recording_fps)
 			try:
 				if "session_dir=" in self.path:
 					session_dir = self.path.split("session_dir=", 1)[1].split("&", 1)[0]
@@ -158,10 +158,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+	cfg = get_config()
 	p = argparse.ArgumentParser(description="Video collector process (optional)")
 	p.add_argument("--config", default=None, help="Path to config.json (optional)")
-	p.add_argument("--host", default="127.0.0.1")
-	p.add_argument("--port", type=int, default=18081)
+	p.add_argument("--host", default=cfg.video.process.collector_host)
+	p.add_argument("--port", type=int, default=int(cfg.video.process.collector_port))
 	p.add_argument("--backend", default=None, help="Backend override (e.g. picamera2/jetson)")
 	args = p.parse_args(argv)
 

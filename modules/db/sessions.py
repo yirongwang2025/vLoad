@@ -2,6 +2,7 @@
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
+from modules.config import get_config
 from modules.db.pool import get_pool, _to_dt
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,12 @@ async def replace_frames(session_id: str, frames: Sequence[Dict[str, Any]]) -> D
 			return {"inserted": len(records)}
 
 
-async def get_frames(session_id: str, limit: int = 200000, t0: Optional[float] = None, t1: Optional[float] = None) -> List[Dict[str, Any]]:
+async def get_frames(
+	session_id: str,
+	limit: Optional[int] = None,
+	t0: Optional[float] = None,
+	t1: Optional[float] = None,
+) -> List[Dict[str, Any]]:
 	"""Return frames for a session from DB. Optional host-time filtering."""
 	pool = get_pool()
 	if pool is None:
@@ -149,7 +155,9 @@ async def get_frames(session_id: str, limit: int = 200000, t0: Optional[float] =
 	sid = (session_id or "").strip()
 	if not sid:
 		return []
-	lim = max(1, min(int(limit), 500000))
+	if limit is None:
+		limit = int(get_config().api.session_frames_limit_default)
+	lim = max(1, min(int(limit), int(get_config().runtime.backfill_frames_limit)))
 	async with pool.acquire() as conn:
 		if t0 is not None and t1 is not None:
 			rows = await conn.fetch(

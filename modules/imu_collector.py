@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from collections import deque
 from typing import Any, Dict, Optional, Tuple
 
+from modules.config import get_config
 from modules.movesense_gatt import MovesenseGATTClient
 
 
@@ -40,6 +41,9 @@ async def _run_collector(
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.setblocking(False)
 	target = (udp_host, int(udp_port))
+	cfg = get_config()
+	ccfg = cfg.collector
+	rcfg = cfg.runtime
 
 	def send(obj: Dict[str, Any]) -> None:
 		try:
@@ -59,14 +63,14 @@ async def _run_collector(
 		# Collector-side rolling 5s receive rate (BLE ground truth, independent of server/WS).
 		try:
 			now_m = time.monotonic()
-			cut = now_m - 5.0
+			cut = now_m - float(rcfg.imu_rx_rate_window_seconds)
 			while rx_window and rx_window[0][0] < cut:
 				rx_window.popleft()
 			while rx_pkts and rx_pkts[0][0] < cut:
 				rx_pkts.popleft()
 			s5 = sum(n for _, n in rx_window)
 			p5 = len(rx_pkts)
-			rate5 = float(s5) / 5.0
+			rate5 = float(s5) / float(rcfg.imu_rx_rate_window_seconds)
 			stale_s = max(0.0, now_m - last_notify_mono)
 		except Exception:
 			s5, p5, rate5, stale_s = None, None, None, None
@@ -101,7 +105,7 @@ async def _run_collector(
 	# Buffer for raw notifications; processing happens on this process's loop.
 	# IMPORTANT: timestamp in the BLE callback thread so IMU times are not skewed by
 	# collector processing backlog (which can be seconds under video load).
-	payload_q: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=600)
+	payload_q: asyncio.Queue[Tuple[float, bytes]] = asyncio.Queue(maxsize=int(ccfg.payload_queue_maxsize))
 	last_notify_mono = time.monotonic()
 
 	def on_data(payload: bytes) -> None:
@@ -124,14 +128,14 @@ async def _run_collector(
 	# Proposed approach: compute a fixed offset once at connect time by averaging
 	# ~1s of packets, then reuse it for the rest of the connection. This reduces
 	# jitter from per-packet BLE scheduling and avoids "backlog skew" entirely.
-	CALIB_WARMUP_S: float = 1.0
-	CALIB_MIN_SAMPLES: int = 6
+	CALIB_WARMUP_S: float = float(ccfg.calib_warmup_seconds)
+	CALIB_MIN_SAMPLES: int = int(ccfg.calib_min_samples)
 	_offset_fixed_s: Optional[float] = None
 	_offset_samples: list[float] = []
 	_calib_start_mono: Optional[float] = None
 	# If we haven't finished calibration yet, we fall back to a lightweight EMA.
 	offset_ema_s: Optional[float] = None
-	offset_alpha: float = 0.02
+	offset_alpha: float = float(ccfg.offset_alpha)
 
 	async def process_payloads() -> None:
 		nonlocal last_sample_t
@@ -241,7 +245,7 @@ async def _run_collector(
 					rx_window.append((now_m, int(len(out_samples))))
 					rx_pkts.append((now_m, 1))
 					# Emit stats at most once per second to keep UDP overhead low.
-					if now_m - last_stat_mono >= 1.0:
+					if now_m - last_stat_mono >= float(ccfg.stat_emit_interval_seconds):
 						send_stat()
 						last_stat_mono = now_m
 				except Exception:
@@ -253,27 +257,32 @@ async def _run_collector(
 	consumer_task = asyncio.create_task(process_payloads())
 
 	# Simple reconnect loop with backoff
-	backoff_s = 0.5
+	backoff_s = float(ccfg.initial_backoff_seconds)
 	try:
 		while True:
 			try:
 				send({"type": "log", "msg": f"[Collector] Connecting to {device} (mode={mode}, rate={rate})..."})
 				# After a drop, BlueZ may need extra time for the peripheral to start advertising again.
 				# Also, give discovery a bit more slack than the default.
-				await client.connect(device, connection_timeout=25.0)
+				await client.connect(device, connection_timeout=float(ccfg.connect_timeout_seconds))
 				connected_addr = device
 				send({"type": "log", "msg": "[Collector] Connected. Sending HELLO..."})
-				await client.hello(ref_id=1)
+				await client.hello(ref_id=int(ccfg.hello_ref_id))
 				send({"type": "log", "msg": "[Collector] Subscribing IMU..."})
 				# Movesense example uses fixed ref; keep stable.
-				sub = await client.subscribe_imu(sample_rate_hz=rate, mode=mode, on_data=on_data, ref_id=99)
+				sub = await client.subscribe_imu(
+					sample_rate_hz=rate,
+					mode=mode,
+					on_data=on_data,
+					ref_id=int(ccfg.subscribe_ref_id),
+				)
 				send({"type": "log", "msg": "[Collector] Subscribed. Streaming."})
 
 				# Watchdog loop: if notifications stop, reconnect.
 				while True:
 					await asyncio.sleep(1.0)
 					stale = time.monotonic() - last_notify_mono
-					if stale > 6.0:
+					if stale > float(ccfg.notify_stale_timeout_seconds):
 						raise RuntimeError(f"IMU notifications stale for {stale:.1f}s")
 			except asyncio.CancelledError:
 				raise
@@ -293,7 +302,7 @@ async def _run_collector(
 					pass
 
 				await asyncio.sleep(backoff_s)
-				backoff_s = min(8.0, backoff_s * 1.6)
+				backoff_s = min(float(ccfg.max_backoff_seconds), backoff_s * float(ccfg.backoff_multiplier))
 				# If device was specified by name and failed, keep same string (Bleak resolves again).
 				if connected_addr is None:
 					connected_addr = device
@@ -316,12 +325,13 @@ async def _run_collector(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+	cfg = get_config()
 	p = argparse.ArgumentParser(description="Movesense IMU collector (separate process)")
 	p.add_argument("--device", required=True, help="Movesense MAC or name")
-	p.add_argument("--mode", default="IMU9", help="IMU mode: IMU6 or IMU9")
-	p.add_argument("--rate", type=int, default=104, help="Sample rate (Hz)")
-	p.add_argument("--udp-host", default="127.0.0.1", help="UDP host for server")
-	p.add_argument("--udp-port", type=int, default=9999, help="UDP port for server")
+	p.add_argument("--mode", default=cfg.movesense.default_mode, help="IMU mode: IMU6 or IMU9")
+	p.add_argument("--rate", type=int, default=int(cfg.movesense.default_rate), help="Sample rate (Hz)")
+	p.add_argument("--udp-host", default=cfg.imu_udp.host, help="UDP host for server")
+	p.add_argument("--udp-port", type=int, default=int(cfg.imu_udp.port), help="UDP port for server")
 	args = p.parse_args(argv)
 
 	try:

@@ -1,13 +1,16 @@
 """Video backend routes. Routes: /video/connect, disconnect, status, mjpeg, snapshot.jpg, debug."""
 import asyncio
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
 from app_state import AppState
 from deps import get_state
+from modules.config import get_config
 
 router = APIRouter(tags=["video"])
+CFG = get_config()
 
 
 @router.post("/video/connect")
@@ -15,7 +18,7 @@ async def video_connect(state: AppState = Depends(get_state)):
 	"""Connect to the active video backend and start MJPEG streaming."""
 	try:
 		state.video.start()
-		await asyncio.sleep(0.2)
+		await asyncio.sleep(float(CFG.runtime.video_connect_warmup_seconds))
 		st = state.video.get_status()
 		if not st.get("running") and st.get("error"):
 			err = str(st.get("error"))
@@ -55,8 +58,10 @@ async def video_status(state: AppState = Depends(get_state)):
 
 
 @router.get("/video/mjpeg")
-async def video_mjpeg(fps: float = 15.0, state: AppState = Depends(get_state)):
+async def video_mjpeg(fps: Optional[float] = None, state: AppState = Depends(get_state)):
 	"""Live MJPEG stream from the active video backend."""
+	if fps is None:
+		fps = float(CFG.video.default_mjpeg_fps)
 	return StreamingResponse(
 		state.video.mjpeg_stream(fps=float(fps)),
 		media_type="multipart/x-mixed-replace; boundary=frame",

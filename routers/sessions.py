@@ -3,7 +3,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -11,9 +11,11 @@ from fastapi.responses import FileResponse
 from app_state import AppState
 from deps import get_state
 from modules import db
+from modules.config import get_config
 from schemas.requests import SessionStartPayload
 
 router = APIRouter(tags=["sessions"])
+CFG = get_config()
 
 
 @router.post("/session/start")
@@ -44,7 +46,7 @@ async def session_start(payload: SessionStartPayload, state: AppState = Depends(
 		except Exception:
 			pass
 		try:
-			base_root = Path(state.cfg.sessions.base_dir or str(Path("data") / "sessions"))
+			base_root = Path(state.cfg.sessions.base_dir)
 			await db.upsert_session_start(
 				session_id=sid,
 				t_start=t_start,
@@ -52,7 +54,7 @@ async def session_start(payload: SessionStartPayload, state: AppState = Depends(
 				imu_rate=state.active_rate,
 				jump_config=state.jump_config,
 				video_backend=(state.video.name() or "video").strip(),
-				video_fps=30,
+				video_fps=int(CFG.video.recording_fps),
 				video_path=str(base_root / sid / "video.mp4"),
 				camera_clock_offset_s=None,
 				meta=None,
@@ -64,7 +66,7 @@ async def session_start(payload: SessionStartPayload, state: AppState = Depends(
 		except Exception as e:
 			raise HTTPException(status_code=500, detail=f"Video backend start failed: {e!r}")
 		try:
-			deadline = time.time() + 3.0
+			deadline = time.time() + float(CFG.runtime.video_start_wait_seconds)
 			last_status = None
 			while time.time() < deadline:
 				st = state.video.get_status()
@@ -73,7 +75,7 @@ async def session_start(payload: SessionStartPayload, state: AppState = Depends(
 					raise HTTPException(status_code=500, detail=f"Video backend error after start(): {st.get('error')}")
 				if bool(st.get("running")):
 					break
-				await asyncio.sleep(0.1)
+				await asyncio.sleep(float(CFG.runtime.video_status_poll_seconds))
 			else:
 				raise HTTPException(status_code=500, detail=f"Video backend did not become running: {last_status!r}")
 		except HTTPException:
@@ -81,11 +83,11 @@ async def session_start(payload: SessionStartPayload, state: AppState = Depends(
 		except Exception as e:
 			raise HTTPException(status_code=500, detail=f"Video backend readiness check failed: {e!r}")
 		try:
-			state.video.start_recording(str(base), fps=30)
+			state.video.start_recording(str(base), fps=int(CFG.video.recording_fps))
 		except Exception as e:
 			raise HTTPException(status_code=500, detail=f"Video backend start_recording raised: {e!r}")
 		try:
-			await asyncio.sleep(0.05)
+			await asyncio.sleep(float(CFG.runtime.video_recording_poll_delay_seconds))
 			st = state.video.get_status()
 			if not bool(st.get("recording")):
 				raise HTTPException(status_code=500, detail=f"Video recording did not start: {st.get('error') or st!r}")
@@ -117,7 +119,7 @@ async def session_stop(state: AppState = Depends(get_state)):
 			pass
 		try:
 			if state.session_dir is not None:
-				state.video.mux_to_mp4_best_effort(state.session_dir, fps=30)
+				state.video.mux_to_mp4_best_effort(state.session_dir, fps=int(CFG.video.recording_fps))
 				try:
 					h264 = state.session_dir / "video.h264"
 					mp4 = state.session_dir / "video.mp4"
@@ -146,7 +148,7 @@ async def session_stop(state: AppState = Depends(get_state)):
 		except Exception:
 			pass
 		try:
-			base_root = Path(state.cfg.sessions.base_dir or str(Path("data") / "sessions"))
+			base_root = Path(state.cfg.sessions.base_dir)
 			await db.update_session_stop(
 				session_id=sid,
 				t_stop=t_stop,
@@ -209,10 +211,10 @@ async def get_session_video(session_id: str, state: AppState = Depends(get_state
 		h264 = base / "video.h264"
 		if h264.exists():
 			try:
-				state.video.mux_to_mp4_best_effort(base, fps=30)
+				state.video.mux_to_mp4_best_effort(base, fps=int(CFG.video.recording_fps))
 			except Exception:
 				pass
-			deadline = time.time() + 15.0
+			deadline = time.time() + float(CFG.runtime.session_video_wait_timeout_seconds)
 			while time.time() < deadline:
 				if mp4.exists() and mp4.stat().st_size > 0:
 					try:
@@ -221,7 +223,7 @@ async def get_session_video(session_id: str, state: AppState = Depends(get_state
 					except Exception:
 						pass
 					return FileResponse(str(mp4), media_type="video/mp4", filename="video.mp4")
-				await asyncio.sleep(0.25)
+				await asyncio.sleep(float(CFG.runtime.session_video_wait_poll_seconds))
 	except Exception:
 		pass
 	raise HTTPException(
@@ -231,8 +233,16 @@ async def get_session_video(session_id: str, state: AppState = Depends(get_state
 
 
 @router.get("/sessions/{session_id}/frames")
-async def get_session_frames(session_id: str, t0: float = None, t1: float = None, limit: int = 200000, state: AppState = Depends(get_state)):
+async def get_session_frames(
+	session_id: str,
+	t0: float = None,
+	t1: float = None,
+	limit: Optional[int] = None,
+	state: AppState = Depends(get_state),
+):
 	"""Return per-frame timing as JSON. Prefers in-memory buffer, then DB, then frames.csv."""
+	if limit is None:
+		limit = int(CFG.api.session_frames_limit_default)
 	if session_id == state.session_id and state.frame_history:
 		try:
 			frames = list(state.frame_history)

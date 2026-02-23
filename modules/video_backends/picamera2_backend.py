@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
+from modules.config import get_config
 from modules.video_backend import VideoBackend, mjpeg_from_latest
 
 
@@ -23,6 +24,7 @@ class Picamera2Backend(VideoBackend):
 	"""
 
 	def __init__(self, camera_index: Optional[int] = None, label: str = "picamera2", initial_config: Optional[Dict[str, Any]] = None) -> None:
+		self._cfg = get_config()
 		self._lock = threading.Lock()
 		self._label = str(label or "picamera2")
 		self._camera_index: Optional[int] = int(camera_index) if camera_index is not None else None
@@ -264,7 +266,7 @@ class Picamera2Backend(VideoBackend):
 			pass
 		t = self._thread
 		if t and t.is_alive():
-			t.join(timeout=2.0)
+			t.join(timeout=float(self._cfg.runtime.picamera_thread_join_timeout_seconds))
 		self._thread = None
 
 	def _run_loop(self) -> None:
@@ -371,7 +373,12 @@ class Picamera2Backend(VideoBackend):
 					arr = request.make_array("lores")
 					im = Image.fromarray(arr)
 					buf = BytesIO()
-					im.save(buf, format="JPEG", quality=80, optimize=True)
+					im.save(
+						buf,
+						format="JPEG",
+						quality=int(self._cfg.video.preview_jpeg_quality),
+						optimize=True,
+					)
 					jpg = buf.getvalue()
 					with self._lock:
 						self._latest_jpeg = jpg
@@ -427,7 +434,7 @@ class Picamera2Backend(VideoBackend):
 				with self._lock:
 					if not self._running:
 						break
-				time.sleep(0.05)
+				time.sleep(float(self._cfg.runtime.picamera_run_loop_sleep_seconds))
 		finally:
 			try:
 				try:
@@ -452,7 +459,7 @@ class Picamera2Backend(VideoBackend):
 		video_h264 = base / "video.h264"
 
 		with self._lock:
-			self._record_fps = int(fps) if int(fps) > 0 else 30
+			self._record_fps = int(fps) if int(fps) > 0 else int(self._cfg.video.recording_fps)
 			self._recording = True
 			self._record_dir = base
 			self._frames = []

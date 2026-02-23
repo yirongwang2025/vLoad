@@ -7,6 +7,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
+from modules.config import get_config
 from modules.video_backend import VideoBackend
 from modules.video_tools import cut_mp4_clip_copy, mux_h264_to_mp4_async
 
@@ -19,6 +20,7 @@ class HttpProxyVideoBackend(VideoBackend):
 
 	def __init__(self, base_url: str) -> None:
 		self._base = base_url.rstrip("/")
+		self._cfg = get_config().http_proxy
 
 	def name(self) -> str:
 		# The collector knows the actual backend; expose as proxy.
@@ -32,7 +34,7 @@ class HttpProxyVideoBackend(VideoBackend):
 
 	def get_status(self) -> Dict[str, Any]:
 		try:
-			with urllib.request.urlopen(self._base + "/status", timeout=2.0) as resp:
+			with urllib.request.urlopen(self._base + "/status", timeout=float(self._cfg.status_timeout_seconds)) as resp:
 				return json.loads(resp.read().decode("utf-8"))
 		except Exception as e:
 			return {"running": False, "error": repr(e)}
@@ -57,12 +59,12 @@ class HttpProxyVideoBackend(VideoBackend):
 		loop = asyncio.get_running_loop()
 
 		def _open():
-			return urllib.request.urlopen(url, timeout=10.0)
+			return urllib.request.urlopen(url, timeout=float(self._cfg.mjpeg_open_timeout_seconds))
 
 		resp = await loop.run_in_executor(None, _open)
 		try:
 			while True:
-				chunk = await loop.run_in_executor(None, resp.read, 8192)
+				chunk = await loop.run_in_executor(None, resp.read, int(self._cfg.mjpeg_read_chunk_bytes))
 				if not chunk:
 					break
 				yield chunk
@@ -77,7 +79,7 @@ class HttpProxyVideoBackend(VideoBackend):
 		loop = asyncio.get_running_loop()
 
 		def _fetch():
-			with urllib.request.urlopen(url, timeout=3.0) as resp:
+			with urllib.request.urlopen(url, timeout=float(self._cfg.snapshot_timeout_seconds)) as resp:
 				return resp.read()
 
 		try:
@@ -97,7 +99,7 @@ class HttpProxyVideoBackend(VideoBackend):
 	def _post(self, path: str) -> None:
 		try:
 			req = urllib.request.Request(self._base + path, method="POST", data=b"")
-			with urllib.request.urlopen(req, timeout=5.0) as _:
+			with urllib.request.urlopen(req, timeout=float(self._cfg.post_timeout_seconds)) as _:
 				return
 		except Exception:
 			return
