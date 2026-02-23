@@ -32,14 +32,14 @@ from modules.movesense_gatt import MovesenseGATTClient
 from modules import db
 from modules.jump_detector import JumpDetectorRealtime
 from modules.video_backend import get_video_backend, start_video_collector_subprocess
-from modules.config import get_config
+from modules.config import get_config, get_jump_detection_defaults
 
 # ----------------------------
 # Pose auto-run (best-effort)
 # ----------------------------
 
 
-async def _run_pose_for_jump_best_effort(event_id: int, max_fps: float = 10.0) -> Dict[str, Any]:
+async def _run_pose_for_jump_best_effort(event_id: int, max_fps: Optional[float] = None) -> Dict[str, Any]:
 	"""
 	Run pose on a jump clip and persist pose_* columns. Designed for background use.
 	If pose deps are missing, store a useful error in pose_meta and return {ok: False}.
@@ -62,9 +62,9 @@ async def _run_pose_for_jump_best_effort(event_id: int, max_fps: float = 10.0) -
 			return {"ok": False, "error": "marks not set"}
 
 		try:
-			max_fps = float(max_fps)
+			max_fps = float(max_fps) if max_fps is not None else float(CFG.pose.max_fps)
 		except Exception:
-			max_fps = 10.0
+			max_fps = float(CFG.pose.max_fps)
 		max_fps = max(1.0, min(30.0, float(max_fps)))
 
 		# Lazy imports so the server can run without pose deps installed.
@@ -105,7 +105,11 @@ async def _run_pose_for_jump_best_effort(event_id: int, max_fps: float = 10.0) -
 		end_frame = int(max(start_frame + 1, round(float(t1v) * float(fps))))
 		cap.set(cv2.CAP_PROP_POS_FRAMES, float(start_frame))
 
-		provider = MediaPipePoseProvider()
+		provider = MediaPipePoseProvider(
+			model_complexity=int(CFG.pose.model_complexity),
+			min_detection_confidence=float(CFG.pose.min_detection_confidence),
+			min_tracking_confidence=float(CFG.pose.min_tracking_confidence),
+		)
 		frames = []
 		i = start_frame
 		try:
@@ -184,7 +188,7 @@ def _maybe_schedule_pose_for_jump(event_id: int) -> None:
 
 	async def _runner():
 		try:
-			await _run_pose_for_jump_best_effort(ev, max_fps=10.0)
+			await _run_pose_for_jump_best_effort(ev, max_fps=float(CFG.pose.max_fps))
 		finally:
 			try:
 				inflight.discard(ev)
@@ -244,21 +248,14 @@ IMU_UDP_HOST = (CFG.imu_udp.host or "127.0.0.1").strip()
 IMU_UDP_PORT = int(CFG.imu_udp.port or 9999)
 
 # Jump clip worker (config only; process ref lives in AppState)
-JUMP_CLIP_JOBS_DIR = (CFG.jobs.jump_clip_jobs_dir or str(Path("data") / "jobs" / "jump_clips"))
+JUMP_CLIP_JOBS_DIR = CFG.jobs.jump_clip_jobs_dir
 
-# Jump detection config defaults (tweakable via /config; runtime copy lives in AppState)
-JUMP_CONFIG_DEFAULTS: Dict[str, float] = {
-	"min_jump_height_m": 0.15,
-	"min_jump_peak_az_no_g": 3.5,
-	"min_jump_peak_gz_deg_s": 180.0,
-	"min_new_event_separation_s": 0.5,
-	"analysis_interval_s": 0.5,
-	"min_revs": 0.0,
-}
+# Jump detection defaults come from config.json (modules/config.py)
+JUMP_CONFIG_DEFAULTS: Dict[str, float] = get_jump_detection_defaults(CFG)
 
 # Constants for buffer sizing (used in lifespan / workers)
-IMU_HISTORY_MAX_SECONDS: float = 60.0
-FRAME_HISTORY_MAX_SECONDS: float = 120.0
+IMU_HISTORY_MAX_SECONDS: float = float(CFG.buffers.imu_history_seconds)
+FRAME_HISTORY_MAX_SECONDS: float = float(CFG.buffers.frame_history_seconds)
 
 # 3.1: single app state instance; set in lifespan, used by helpers that run outside request context
 _app_state: Optional[AppState] = None
@@ -284,7 +281,7 @@ async def _do_connect_imu_for_skater(st: AppState, skater_id: int) -> bool:
 			except Exception:
 				pass
 			try:
-				st.imu_proc.wait(timeout=3)
+				st.imu_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 			except Exception:
 				pass
 			st.imu_proc = None
@@ -356,8 +353,11 @@ async def _auto_connect_loop(st: AppState) -> None:
 			last_t = st.dbg.get("last_imu_t")
 			hist_len = len(st.imu_history) if st.imu_history else 0
 			if (last_t is not None and last_t > 0) or hist_len > 0:
+				st.jump_detection_enabled = bool(CFG.auto_connect.jump_detection_enabled)
 				if st.log_to_clients:
-					st.log_to_clients("[AutoConnect] IMU connected successfully")
+					st.log_to_clients(
+						f"[AutoConnect] IMU connected successfully (detection={'on' if st.jump_detection_enabled else 'off'})"
+					)
 				break
 			if st.log_to_clients:
 				st.log_to_clients(f"[AutoConnect] No IMU data yet; retrying in {retry_sec:.0f}s...")
@@ -367,7 +367,7 @@ async def _auto_connect_loop(st: AppState) -> None:
 				except Exception:
 					pass
 				try:
-					st.imu_proc.wait(timeout=3)
+					st.imu_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 				except Exception:
 					pass
 				st.imu_proc = None
@@ -428,10 +428,10 @@ async def lifespan(app: FastAPI):
 		app_state.read_last_clip_job_error = _read_last_clip_job_error
 		app_state.session_lock = asyncio.Lock()
 		# Buffers and queues (created here, consumed by workers and UDP)
-		app_state.jump_sample_queue = asyncio.Queue(maxsize=2000)
+		app_state.jump_sample_queue = asyncio.Queue(maxsize=int(CFG.buffers.jump_sample_queue_maxsize))
 		app_state.imu_history = deque()
 		app_state.frame_history = deque()
-		app_state.jump_events = deque(maxlen=1000)
+		app_state.jump_events = deque(maxlen=int(CFG.buffers.jump_events_maxlen))
 		app_state.next_event_id = 1
 		app_state.imu_rx_window = deque()
 		app_state.imu_rx_window_pkts = deque()
@@ -526,7 +526,7 @@ async def lifespan(app: FastAPI):
 					now_m = time.monotonic()
 					st.imu_rx_window.append((now_m, int(len(samples))))
 					st.imu_rx_window_pkts.append((now_m, 1))
-					cut = now_m - 5.0
+					cut = now_m - float(CFG.runtime.imu_rx_rate_window_seconds)
 					while st.imu_rx_window and st.imu_rx_window[0][0] < cut:
 						st.imu_rx_window.popleft()
 					while st.imu_rx_window_pkts and st.imu_rx_window_pkts[0][0] < cut:
@@ -535,7 +535,7 @@ async def lifespan(app: FastAPI):
 					p5 = len(st.imu_rx_window_pkts)
 					st.dbg["imu_samples_5s"] = int(s5)
 					st.dbg["imu_packets_5s"] = int(p5)
-					st.dbg["imu_rate_hz_5s"] = float(s5) / 5.0
+					st.dbg["imu_rate_hz_5s"] = float(s5) / float(CFG.runtime.imu_rx_rate_window_seconds)
 				except Exception:
 					pass
 
@@ -589,7 +589,7 @@ async def lifespan(app: FastAPI):
 								"mag": s.get("mag", []),
 							}
 						)
-						if len(st.imu_history) > 100:
+						if len(st.imu_history) > int(CFG.runtime.imu_history_prune_check_min_len):
 							cutoff = t_i - IMU_HISTORY_MAX_SECONDS
 							while st.imu_history:
 								first_t = float(st.imu_history[0].get("t", 0.0))
@@ -658,7 +658,15 @@ async def lifespan(app: FastAPI):
 		try:
 			jobs_dir = Path(JUMP_CLIP_JOBS_DIR)
 			jobs_dir.mkdir(parents=True, exist_ok=True)
-			cmd = [sys.executable, "-m", "modules.jump_clip_worker", "--jobs-dir", str(jobs_dir)]
+			cmd = [
+				sys.executable,
+				"-m",
+				"modules.jump_clip_worker",
+				"--jobs-dir",
+				str(jobs_dir),
+				"--poll-s",
+				str(float(CFG.clip_worker.poll_seconds)),
+			]
 			log_path = jobs_dir / "worker.log"
 			log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
 			app_state.clip_worker_proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
@@ -709,7 +717,7 @@ async def lifespan(app: FastAPI):
 			except Exception:
 				pass
 			try:
-				st_clean.video_proc.wait(timeout=3)
+				st_clean.video_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 			except Exception:
 				pass
 			st_clean.video_proc = None
@@ -725,7 +733,7 @@ async def lifespan(app: FastAPI):
 			except Exception:
 				pass
 			try:
-				st_clean.clip_worker_proc.wait(timeout=3)
+				st_clean.clip_worker_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 			except Exception:
 				pass
 			st_clean.clip_worker_proc = None
@@ -741,7 +749,7 @@ async def lifespan(app: FastAPI):
 			except Exception:
 				pass
 			try:
-				st_clean.imu_proc.wait(timeout=3)
+				st_clean.imu_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 			except Exception:
 				pass
 			st_clean.imu_proc = None
@@ -826,7 +834,7 @@ async def _frame_sync_loop(st: AppState) -> None:
 	
 	while True:
 		try:
-			await asyncio.sleep(0.1)  # Sync every 100ms (10 Hz)
+			await asyncio.sleep(float(CFG.runtime.frame_sync_interval_seconds))
 			
 			# Only sync if recording is active
 			if st.session_id is None:
@@ -881,7 +889,7 @@ async def _frame_sync_loop(st: AppState) -> None:
 			break
 		except Exception:
 			# Keep loop running even on errors
-			await asyncio.sleep(0.5)
+			await asyncio.sleep(float(CFG.runtime.frame_sync_error_backoff_seconds))
 
 
 def _ensure_unique_jump_window(
@@ -909,7 +917,7 @@ def _ensure_unique_jump_window(
 	window_end = base_window_end
 	
 	# Check for overlaps and adjust
-	overlap_tolerance = 0.1  # Small tolerance to avoid exact boundary overlaps
+	overlap_tolerance = float(CFG.runtime.overlap_tolerance_seconds)
 	for existing_event_id, existing_start, existing_end in existing_windows:
 		if existing_event_id == event_id:
 			continue  # Skip self
@@ -932,7 +940,7 @@ def _ensure_unique_jump_window(
 				window_start = max(window_start, existing_end + overlap_tolerance)
 			
 			# Ensure window still includes the jump (minimum window size)
-			min_window_size = 2.0  # Minimum 2 seconds
+			min_window_size = float(CFG.runtime.min_window_size_seconds)
 			if window_end - window_start < min_window_size:
 				# If adjustment made window too small, center it on t_peak
 				window_center = t_peak
@@ -942,8 +950,9 @@ def _ensure_unique_jump_window(
 			# Ensure window_start < window_end
 			if window_start >= window_end:
 				# Fallback: use a tight window around t_peak
-				window_start = t_peak - 1.0
-				window_end = t_peak + 1.0
+				half = float(CFG.runtime.fallback_window_half_seconds)
+				window_start = t_peak - half
+				window_end = t_peak + half
 	
 	# Store this window for future overlap checks
 	if session_id not in st.jump_windows_by_session:
@@ -951,8 +960,8 @@ def _ensure_unique_jump_window(
 	st.jump_windows_by_session[session_id].append((event_id, window_start, window_end))
 	
 	# Clean up old windows (keep last 100 per session to avoid unbounded growth)
-	if len(st.jump_windows_by_session[session_id]) > 100:
-		st.jump_windows_by_session[session_id] = st.jump_windows_by_session[session_id][-100:]
+	if len(st.jump_windows_by_session[session_id]) > int(CFG.runtime.jump_windows_history_per_session):
+		st.jump_windows_by_session[session_id] = st.jump_windows_by_session[session_id][-int(CFG.runtime.jump_windows_history_per_session):]
 	
 	return (window_start, window_end)
 
@@ -969,7 +978,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 	while True:
 		if st.jump_sample_queue is None:
 			# Should not happen often; be defensive.
-			await asyncio.sleep(0.1)
+			await asyncio.sleep(float(CFG.runtime.jump_worker_idle_sleep_seconds))
 			continue
 
 		sample = await st.jump_sample_queue.get()
@@ -982,7 +991,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 		if jump_detector is None or last_rate != active_rate:
 			jump_detector = JumpDetectorRealtime(
 				sample_rate_hz=active_rate,
-				window_seconds=3.0,
+				window_seconds=float(st.jump_config.get("window_seconds", CFG.jump_detection.window_seconds)),
 				logger=_jump_log_filter,
 				config=st.jump_config,
 			)
@@ -1070,8 +1079,9 @@ async def _jump_worker_loop(st: AppState) -> None:
 					pre_jump_s = float(st.cfg.jump_recording.pre_jump_seconds)
 					post_jump_s = float(st.cfg.jump_recording.post_jump_seconds)
 					# Window should be centered on t_peak, but ensure it includes takeoff/landing
-					base_window_start = min(t_takeoff_val - 0.5, t_peak_val - pre_jump_s)
-					base_window_end = max(t_landing_val + 0.5, t_peak_val + post_jump_s)
+					edge_guard = float(CFG.runtime.takeoff_landing_edge_guard_seconds)
+					base_window_start = min(t_takeoff_val - edge_guard, t_peak_val - pre_jump_s)
+					base_window_end = max(t_landing_val + edge_guard, t_peak_val + post_jump_s)
 					
 					# Ensure window uniqueness: check for overlaps with existing jumps in same session
 					# and adjust boundaries to avoid overlap
@@ -1109,7 +1119,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 						# Optimized: reduce wait time since we have in-memory buffer, and use more aggressive polling.
 						try:
 							post_jump_s = float(st_arg.cfg.jump_recording.post_jump_seconds)
-							deadline = time.time() + post_jump_s + 0.5  # Reduced from 1.5s to 0.5s slack
+							deadline = time.time() + post_jump_s + float(st_arg.cfg.runtime.imu_wait_slack_seconds)
 							wait_start = time.time()
 							while time.time() < deadline:
 								last_t = st_arg.dbg.get("last_imu_t")
@@ -1119,7 +1129,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 									last_t_f = None
 								if last_t_f is not None and last_t_f >= float(window_end_arg):
 									break
-								await asyncio.sleep(0.02)  # More aggressive polling: 20ms instead of 50ms
+								await asyncio.sleep(float(st_arg.cfg.runtime.imu_wait_poll_seconds))
 							try:
 								st_arg.dbg["db_window_waited_s"] = float(max(0.0, time.time() - wait_start))
 							except Exception:
@@ -1163,6 +1173,9 @@ async def _jump_worker_loop(st: AppState) -> None:
 							clip_start_host = float(window_start_arg) - clip_buffer_s
 							clip_end_host = float(window_end_arg) + clip_buffer_s
 							clip_duration = clip_end_host - clip_start_host
+							base_dir = Path(st_arg.cfg.sessions.base_dir) / str(st_arg.session_id or "")
+							mp4_path = base_dir / "video.mp4"
+							h264_path = base_dir / "video.h264"
 							# Debug logging for clip length issues
 							st_arg.log_to_clients(
 								f"[Clip] event_id={event_id_arg}: window=[{window_start_arg:.3f}, {window_end_arg:.3f}], "
@@ -1171,8 +1184,9 @@ async def _jump_worker_loop(st: AppState) -> None:
 						except Exception:
 							pre_jump_s = float(st_arg.cfg.jump_recording.pre_jump_seconds)
 							post_jump_s = float(st_arg.cfg.jump_recording.post_jump_seconds)
-							clip_start_host = float(t_peak_val_arg) - pre_jump_s - 0.4
-							clip_end_host = float(t_peak_val_arg) + post_jump_s + 0.4
+							clip_extra = float(CFG.runtime.clip_fallback_extra_seconds)
+							clip_start_host = float(t_peak_val_arg) - pre_jump_s - clip_extra
+							clip_end_host = float(t_peak_val_arg) + post_jump_s + clip_extra
 
 						st_arg.enqueue_jump_clip_job(
 							{
@@ -1181,8 +1195,8 @@ async def _jump_worker_loop(st: AppState) -> None:
 								"session_id": str(st_arg.session_id or ""),
 								"clip_start_host": float(clip_start_host),
 								"clip_end_host": float(clip_end_host),
-								"video_fps": 30,
-								"wait_mp4_timeout_s": 900,
+								"video_fps": int(st_arg.cfg.video.recording_fps),
+								"wait_mp4_timeout_s": float(CFG.runtime.clip_wait_mp4_timeout_seconds),
 							}
 						)
 
@@ -1220,7 +1234,7 @@ def _session_base_dir(session_id: str) -> Path:
 	# NOTE: Do not call get_config() here because server.py defines an async route handler
 	# named get_config(), which can shadow the imported modules.config.get_config symbol.
 	# Use the already-loaded global CFG instead.
-	base = Path(CFG.sessions.base_dir or str(Path("data") / "sessions"))
+	base = Path(CFG.sessions.base_dir)
 	return base / session_id
 
 
@@ -1317,21 +1331,21 @@ async def _generate_jump_clips_for_session(session_id: str) -> None:
 			return
 
 		# Pull all jumps and filter locally by session_id (keeps DB changes minimal).
-		rows = await db.list_jumps(limit=2000)
+		rows = await db.list_jumps(limit=int(CFG.runtime.backfill_jumps_limit))
 		jumps_in_session = [r for r in rows if r.get("session_id") == session_id]
 		if not jumps_in_session:
 			return
 
 		clip_backend = get_video_backend_for_tools()
 
-		clips_dir = base / (CFG.sessions.jump_clips_subdir or "jump_clips")
+		clips_dir = base / CFG.sessions.jump_clips_subdir
 		clips_dir.mkdir(parents=True, exist_ok=True)
 
 		# Load session frames (from DB if present, otherwise from file endpoint fallback).
 		# We'll use these to store per-jump clip-relative frame timing linked to each jump.
 		session_frames: list[dict] = []
 		try:
-			session_frames = await db.get_frames(session_id=session_id, limit=500000)
+			session_frames = await db.get_frames(session_id=session_id, limit=int(CFG.runtime.backfill_frames_limit))
 		except Exception:
 			session_frames = []
 		if not session_frames:
@@ -1371,14 +1385,15 @@ async def _generate_jump_clips_for_session(session_id: str) -> None:
 				t0 = j.get("t_start")
 				t1 = j.get("t_end")
 				tp = j.get("t_peak")
-				pre = 0.8
-				post = 0.8
+				pre = float(CFG.jump_recording.clip_buffer_seconds)
+				post = float(CFG.jump_recording.clip_buffer_seconds)
 				if isinstance(t0, (int, float)) and isinstance(t1, (int, float)) and float(t1) > float(t0):
 					clip_start_host = float(t0) - pre
 					clip_end_host = float(t1) + post
 				elif isinstance(tp, (int, float)):
-					clip_start_host = float(tp) - 1.2
-					clip_end_host = float(tp) + 1.2
+					half = float(CFG.export.jump_fallback_half_window_seconds)
+					clip_start_host = float(tp) - half
+					clip_end_host = float(tp) + half
 				else:
 					continue
 
@@ -1396,7 +1411,7 @@ async def _generate_jump_clips_for_session(session_id: str) -> None:
 
 				if ok_cut and out_path.exists() and out_path.stat().st_size > 0:
 					# Store a relative path usable by GET /files (restricted to data/ subtree).
-					rel = str(Path(CFG.sessions.base_dir or str(Path("data") / "sessions")) / session_id / (CFG.sessions.jump_clips_subdir or "jump_clips") / out_name)
+					rel = str(Path(CFG.sessions.base_dir) / session_id / CFG.sessions.jump_clips_subdir / out_name)
 					await db.set_jump_video_path(event_id, rel)
 
 				# Persist per-jump frames (clip-relative) linked to jump_id.
@@ -1501,7 +1516,7 @@ async def connect_device(payload: ConnectPayload, state: AppState = Depends(get_
 			except Exception:
 				pass
 			try:
-				state.imu_proc.wait(timeout=3)
+				state.imu_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 			except Exception:
 				pass
 			state.imu_proc = None
@@ -1548,7 +1563,7 @@ async def disconnect_device(state: AppState = Depends(get_state)):
 		except Exception:
 			pass
 		try:
-			state.imu_proc.wait(timeout=3)
+			state.imu_proc.wait(timeout=float(CFG.runtime.subprocess_wait_timeout_seconds))
 		except Exception:
 			pass
 		state.imu_proc = None
@@ -1709,7 +1724,7 @@ def _compute_analysis(sample: Dict[str, Any]) -> Dict[str, float]:
 	return out
 
 @app.get("/export")
-async def export_imu(seconds: float = 30.0, mode: str = "raw", state: AppState = Depends(get_state)):
+async def export_imu(seconds: Optional[float] = None, mode: str = "raw", state: AppState = Depends(get_state)):
 	"""
 	Export recent IMU data for offline analysis / labelling.
 
@@ -1719,6 +1734,8 @@ async def export_imu(seconds: float = 30.0, mode: str = "raw", state: AppState =
 	    detected jump events within the last `seconds`.
 	"""
 	now = time.time()
+	if seconds is None:
+		seconds = float(CFG.export.default_seconds)
 	horizon = max(0.0, float(seconds))
 	cutoff = now - horizon
 
@@ -1734,7 +1751,7 @@ async def export_imu(seconds: float = 30.0, mode: str = "raw", state: AppState =
 			t0 = ev.get("t_takeoff")
 			t1 = ev.get("t_landing")
 			if t0 is None or t1 is None:
-				half = 0.75
+				half = float(CFG.export.jump_fallback_half_window_seconds)
 				t0 = t_peak - half
 				t1 = t_peak + half
 			t0 = float(t0)

@@ -9,6 +9,7 @@ from .web_jump_detection import (
 	compute_window_metrics,
 	select_jump_events,
 )
+from .config import get_config, get_jump_detection_defaults
 
 
 class JumpDetectorRealtime:
@@ -38,13 +39,24 @@ class JumpDetectorRealtime:
 
 	def __init__(
 		self,
-		sample_rate_hz: float = 104.0,
-		window_seconds: float = 3.0,
+		sample_rate_hz: Optional[float] = None,
+		window_seconds: Optional[float] = None,
 		logger: Optional[Callable[[str], None]] = None,
 		config: Optional[Dict[str, float]] = None,
 	) -> None:
-		self.sample_rate_hz = float(sample_rate_hz) if sample_rate_hz > 0 else 104.0
-		self.window_seconds = float(window_seconds) if window_seconds > 0 else 3.0
+		cfg = get_config()
+		rate_default = float(cfg.movesense.default_rate)
+		window_default = float(cfg.jump_detection.window_seconds)
+		self.sample_rate_hz = (
+			float(sample_rate_hz)
+			if (sample_rate_hz is not None and float(sample_rate_hz) > 0.0)
+			else rate_default
+		)
+		self.window_seconds = (
+			float(window_seconds)
+			if (window_seconds is not None and float(window_seconds) > 0.0)
+			else window_default
+		)
 		self.logger: Callable[[str], None] = logger or (lambda _msg: None)
 
 		maxlen = max(10, int(self.sample_rate_hz * self.window_seconds))
@@ -56,6 +68,7 @@ class JumpDetectorRealtime:
 		self._last_phase2_2_log_t: float = 0.0
 		self._last_phase2_3_log_t: float = 0.0
 		self._last_phase2_4_log_t: float = 0.0
+		self._last_debug_diag_t: float = 0.0
 
 		# Phase 2.2 parameters: simple, conservative defaults.
 		# Minimum |az-g| needed to count as a peak (m/s^2).
@@ -83,6 +96,15 @@ class JumpDetectorRealtime:
 		# Persistent tracking of last takeoff time across analysis cycles for separation enforcement
 		self._last_t_takeoff_persistent: float = -1e9
 
+		# Pull centralized defaults from config.json first.
+		default_cfg = get_jump_detection_defaults(get_config())
+		for key, value in default_cfg.items():
+			if hasattr(self, key):
+				try:
+					setattr(self, key, float(value))
+				except (TypeError, ValueError):
+					continue
+
 		# Optional overrides from config dict.
 		if config:
 			for key, value in config.items():
@@ -109,10 +131,12 @@ class JumpDetectorRealtime:
 				return []
 
 			az = float(acc[2])
+			gx = float(gyro[0])
+			gy = float(gyro[1])
 			gz = float(gyro[2])
 			t = float(sample.get("t", time.time()))
 
-			self._buffer.append({"t": t, "az": az, "gz": gz})
+			self._buffer.append({"t": t, "az": az, "gx": gx, "gy": gy, "gz": gz})
 
 			# Emit a one‑time log line once we have at least ~1 second of data
 			if not self._phase1_logged and len(self._buffer) >= int(self.sample_rate_hz):
@@ -192,6 +216,17 @@ class JumpDetectorRealtime:
 				)
 				# Update persistent tracking for next analysis cycle
 				self._last_t_takeoff_persistent = updated_last_t_takeoff
+				if now_wall - self._last_debug_diag_t >= 1.0:
+					try:
+						# Keep the cadence checkpoint without emitting debug logs.
+						_ = (
+							max((float(m.get("peak_az_no_g", 0.0)) for m in metrics), default=0.0),
+							max((float(m.get("peak_gz", 0.0)) for m in metrics), default=0.0),
+							max((float(m.get("height", 0.0)) for m in metrics), default=0.0),
+						)
+					except Exception:
+						pass
+					self._last_debug_diag_t = now_wall
 				# Step 2.3: filter by minimum revolutions (if available).
 				if self.min_revs and self.min_revs > 0.0:
 					filtered: List[Dict[str, Any]] = []

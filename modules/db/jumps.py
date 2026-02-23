@@ -4,6 +4,7 @@ import math
 import statistics
 from typing import Any, Dict, List, Optional, Sequence
 
+from modules.config import get_config
 from modules.db.helpers import frame_row_to_dict, imu_sample_row_to_dict, jump_row_to_dict
 from modules.db.pool import get_pool, _to_dt
 
@@ -50,7 +51,7 @@ async def replace_jump_frames(jump_id: int, frames: Sequence[Dict[str, Any]]) ->
 			return {"inserted": len(records)}
 
 
-async def get_jump_frames(jump_id: int, limit: int = 200000) -> List[Dict[str, Any]]:
+async def get_jump_frames(jump_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
 	"""
 	Get clip-relative frames for a jump.
 	"""
@@ -58,7 +59,9 @@ async def get_jump_frames(jump_id: int, limit: int = 200000) -> List[Dict[str, A
 	if pool is None:
 		return []
 	jid = int(jump_id)
-	lim = max(1, min(int(limit), 500000))
+	if limit is None:
+		limit = int(get_config().api.session_frames_limit_default)
+	lim = max(1, min(int(limit), int(get_config().runtime.backfill_frames_limit)))
 	async with pool.acquire() as conn:
 		rows = await conn.fetch(
 			"""
@@ -514,7 +517,7 @@ async def recompute_marked_imu_metrics(event_id: int) -> Dict[str, Any]:
 			return {"ok": False, "error": "invalid marks (end must be after start)"}
 
 		# Gyro bias window: [t0-0.5, t0-0.1]
-		b0 = t0 - 0.5
+		b0 = t0 - float(get_config().runtime.takeoff_landing_edge_guard_seconds)
 		b1 = t0 - 0.1
 		bias_rows = await conn.fetch(
 			"""
@@ -694,7 +697,7 @@ async def recompute_marked_imu_metrics_by_jump_id(jump_id: int) -> Dict[str, Any
 			return {"ok": False, "error": "invalid marks (end must be after start)"}
 
 		# Gyro bias window: [t0-0.5, t0-0.1]
-		b0 = t0 - 0.5
+		b0 = t0 - float(get_config().runtime.takeoff_landing_edge_guard_seconds)
 		b1 = t0 - 0.1
 		bias_rows = await conn.fetch(
 			"""
@@ -911,14 +914,16 @@ async def update_jump_pose_metrics_by_jump_id(
 		return {"ok": True, "jump_id": jid}
 
 
-async def list_jumps(limit: int = 200) -> List[Dict[str, Any]]:
+async def list_jumps(limit: Optional[int] = None) -> List[Dict[str, Any]]:
 	"""
 	Return recent jumps ordered by t_peak DESC (detection time).
 	"""
 	pool = get_pool()
 	if pool is None:
 		return []
-	lim = max(1, min(int(limit), 1000))
+	if limit is None:
+		limit = int(get_config().api.jumps_list_limit_default)
+	lim = max(1, min(int(limit), int(get_config().api.jumps_list_limit_max)))
 	async with pool.acquire() as conn:
 		rows = await conn.fetch(
 			"""
@@ -1170,7 +1175,7 @@ async def delete_jump(event_id: int) -> Dict[str, Any]:
 		async with conn.transaction():
 			row = await conn.fetchrow(
 				"""
-				SELECT id
+				SELECT id, video_path
 				FROM jumps
 				WHERE event_id = $1
 				ORDER BY created_at DESC
@@ -1181,6 +1186,7 @@ async def delete_jump(event_id: int) -> Dict[str, Any]:
 			if not row:
 				return {"deleted": False, "detail": f"No jump found for event_id={eid}"}
 			jump_id = int(row["id"])
+			video_path = row.get("video_path")
 			imu_cnt = await conn.fetchval("SELECT COUNT(*) FROM imu_samples WHERE jump_id = $1;", jump_id)
 			frame_cnt = await conn.fetchval("SELECT COUNT(*) FROM jump_frames WHERE jump_id = $1;", jump_id)
 			del_row = await conn.fetchrow(
@@ -1195,6 +1201,7 @@ async def delete_jump(event_id: int) -> Dict[str, Any]:
 				"deleted": bool(del_row),
 				"jump_id": jump_id,
 				"event_id": eid,
+				"video_path": (str(video_path) if video_path else None),
 				"imu_samples_deleted": int(imu_cnt or 0),
 				"frames_deleted": int(frame_cnt or 0),
 				"detail": f"Deleted jump event_id={eid} (jump_id={jump_id}), {int(imu_cnt or 0)} IMU samples, and {int(frame_cnt or 0)} frames",
@@ -1214,7 +1221,7 @@ async def delete_jump_by_jump_id(jump_id: int) -> Dict[str, Any]:
 		async with conn.transaction():
 			row = await conn.fetchrow(
 				"""
-				SELECT id, event_id
+				SELECT id, event_id, video_path
 				FROM jumps
 				WHERE id = $1
 				LIMIT 1;
@@ -1224,6 +1231,7 @@ async def delete_jump_by_jump_id(jump_id: int) -> Dict[str, Any]:
 			if not row:
 				return {"deleted": False, "detail": f"No jump found for jump_id={jid}"}
 			eid = row["event_id"]
+			video_path = row.get("video_path")
 			imu_cnt = await conn.fetchval("SELECT COUNT(*) FROM imu_samples WHERE jump_id = $1;", jid)
 			frame_cnt = await conn.fetchval("SELECT COUNT(*) FROM jump_frames WHERE jump_id = $1;", jid)
 			del_row = await conn.fetchrow(
@@ -1238,6 +1246,7 @@ async def delete_jump_by_jump_id(jump_id: int) -> Dict[str, Any]:
 				"deleted": bool(del_row),
 				"jump_id": jid,
 				"event_id": eid,
+				"video_path": (str(video_path) if video_path else None),
 				"imu_samples_deleted": int(imu_cnt or 0),
 				"frames_deleted": int(frame_cnt or 0),
 				"detail": f"Deleted jump jump_id={jid} (event_id={eid}), {int(imu_cnt or 0)} IMU samples, and {int(frame_cnt or 0)} frames",
@@ -1279,7 +1288,7 @@ async def delete_jumps_bulk(jump_ids: List[int]) -> Dict[str, Any]:
 			# Get jump info before deletion
 			rows = await conn.fetch(
 				f"""
-				SELECT id, event_id
+				SELECT id, event_id, video_path
 				FROM jumps
 				WHERE id IN ({placeholders});
 				""",
@@ -1298,15 +1307,39 @@ async def delete_jumps_bulk(jump_ids: List[int]) -> Dict[str, Any]:
 			
 			deleted_count = len(deleted_rows)
 			event_ids = [r["event_id"] for r in deleted_rows]
+			video_paths = [str(r["video_path"]) for r in rows if r.get("video_path")]
 			
 			return {
 				"deleted_count": deleted_count,
 				"jump_ids": [int(r["id"]) for r in deleted_rows],
 				"event_ids": event_ids,
+				"video_paths": video_paths,
 				"imu_samples_deleted": int(imu_cnt or 0),
 				"frames_deleted": int(frame_cnt or 0),
 				"detail": f"Deleted {deleted_count} jump(s), {int(imu_cnt or 0)} IMU sample(s), and {int(frame_cnt or 0)} frame(s)",
 			}
+
+
+async def is_video_path_referenced(video_path: str) -> bool:
+	"""
+	Check whether any jump row still references the given relative clip path.
+	"""
+	pool = get_pool()
+	if pool is None:
+		return False
+	vp = str(video_path or "").strip()
+	if not vp:
+		return False
+	async with pool.acquire() as conn:
+		cnt = await conn.fetchval(
+			"""
+			SELECT COUNT(*)
+			FROM jumps
+			WHERE video_path = $1;
+			""",
+			vp,
+		)
+	return bool(int(cnt or 0) > 0)
 
 
 # Device management functions

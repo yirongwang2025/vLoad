@@ -14,6 +14,7 @@ This module currently provides:
 
 import math
 from typing import Dict, Any, List, Optional, Tuple
+from .config import get_config
 
 # Cache for preprocess_vertical_series to avoid recomputing when buffer unchanged
 _preprocess_cache: Optional[Tuple[int, float, float, Dict[str, Any]]] = None
@@ -144,7 +145,7 @@ def _smooth_1pole(series: List[float], dt: float, cutoff_hz: float) -> List[floa
 def preprocess_vertical_series(buffer: List[Dict[str, float]]) -> Dict[str, Any]:
 	"""
 	Convert a list of samples of the form
-	    {"t": <float>, "az": <float>, "gz": <float>}
+	    {"t": <float>, "az": <float>, "gx": <float>, "gy": <float>, "gz": <float>}
 	into structured series and simple summary stats.
 
 	Returns a dict with:
@@ -201,18 +202,21 @@ def preprocess_vertical_series(buffer: List[Dict[str, float]]) -> Dict[str, Any]
 	for s in buffer:
 		t = float(s.get("t", 0.0))
 		az = float(s.get("az", 0.0))
+		gx = float(s.get("gx", 0.0))
+		gy = float(s.get("gy", 0.0))
 		gz = float(s.get("gz", 0.0))
+		g_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
 		t_series.append(t)
 		az_series.append(az)
 		az_no_g_series.append(az - 9.8)
-		gz_series.append(gz)
+		gz_series.append(g_mag)
 
 	count = len(t_series)
 	duration = t_series[-1] - t_series[0] if count > 1 else 0.0
 	dt = duration / (count - 1) if count > 1 and duration > 0.0 else 0.0
 
-	# Light smoothing at ~10 Hz to emphasise jump‑scale structure.
-	cutoff_hz = 10.0
+	# Light smoothing to emphasize jump-scale structure.
+	cutoff_hz = float(get_config().jump_detection.smoothing_cutoff_hz)
 	if dt > 0.0:
 		az_smooth = _smooth_1pole(az_series, dt, cutoff_hz)
 		az_no_g_smooth = _smooth_1pole(az_no_g_series, dt, cutoff_hz)
@@ -405,7 +409,8 @@ def compute_window_metrics(
 	# - Landing: last crossing from <0 to >=0 BEFORE the landing impulse peak.
 	# This aligns with az_no_g: positive during push-off/impact (above g), and
 	# negative during flight (accelerometer reads ~0 so az_no_g ~ -g).
-	REFINE_WINDOW_S = 0.25
+	jd_cfg = get_config().jump_detection
+	REFINE_WINDOW_S = float(jd_cfg.refine_window_s)
 
 	# Estimate dt (best-effort) to convert seconds -> sample counts.
 	if n >= 2:
@@ -483,8 +488,8 @@ def compute_window_metrics(
 		# --- Step 2.2: revolution counting + under-rotation estimate ---
 		# gz_smooth is in degrees/second in our pipeline (Movesense gyro units).
 		# We bias-correct using a pre-takeoff baseline window, then integrate to angle.
-		BIAS_START_S = 0.5  # seconds before takeoff
-		BIAS_END_S = 0.1    # seconds before takeoff
+		BIAS_START_S = float(jd_cfg.bias_window_start_s)  # seconds before takeoff
+		BIAS_END_S = float(jd_cfg.bias_window_end_s)  # seconds before takeoff
 
 		bias_t0 = t_takeoff_ref - BIAS_START_S
 		bias_t1 = t_takeoff_ref - BIAS_END_S

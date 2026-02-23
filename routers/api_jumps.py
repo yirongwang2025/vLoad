@@ -1,14 +1,68 @@
 """Jumps DB API and pose. Routes: /db/jumps* (canonical by jump_id), /db/status, /pose/jumps/*/run."""
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app_state import AppState
 from deps import get_state
 from modules import db
+from modules.config import get_config
 from schemas.requests import BulkDeletePayload, JumpMarksPayload
 
 router = APIRouter(tags=["api_jumps"])
+CFG = get_config()
+
+
+def _remove_file_if_exists(path: Path) -> bool:
+	try:
+		if path.exists():
+			path.unlink()
+			return True
+	except Exception:
+		return False
+	return False
+
+
+def _safe_clip_path(path_str: str) -> Optional[Path]:
+	try:
+		p = Path(path_str)
+		p_resolved = p.resolve()
+		data_root = Path("data").resolve()
+		if data_root == p_resolved or data_root in p_resolved.parents:
+			return p_resolved
+	except Exception:
+		return None
+	return None
+
+
+def _cleanup_deleted_jump_artifacts(jump_ids: list[int], video_paths: list[str]) -> Dict[str, int]:
+	"""
+	Best-effort filesystem cleanup after jump delete:
+	- remove clip files referenced by deleted rows
+	- remove pending/processing clip jobs for deleted jump_ids
+	"""
+	removed_clips = 0
+	removed_jobs = 0
+	try:
+		jobs_dir = Path(CFG.jobs.jump_clip_jobs_dir)
+		done_dir = jobs_dir / "done"
+		fail_dir = jobs_dir / "failed"
+		for jid in jump_ids:
+			patterns = [f"jump_{int(jid)}_*.json", f"jump_{int(jid)}_*.processing"]
+			for root in (jobs_dir, done_dir, fail_dir):
+				for pat in patterns:
+					for job_path in root.glob(pat):
+						if _remove_file_if_exists(job_path):
+							removed_jobs += 1
+	except Exception:
+		pass
+
+	for vp in video_paths:
+		p = _safe_clip_path(str(vp))
+		if p is not None and _remove_file_if_exists(p):
+			removed_clips += 1
+	return {"removed_jobs": int(removed_jobs), "removed_clips": int(removed_clips)}
 
 
 def _maybe_schedule_pose_after_marks(state: AppState, out: Dict[str, Any], event_id: int) -> None:
@@ -25,9 +79,11 @@ def _maybe_schedule_pose_after_marks(state: AppState, out: Dict[str, Any], event
 
 # ---- List and status (unchanged) ----
 @router.get("/db/jumps")
-async def db_list_jumps(limit: int = 200):
+async def db_list_jumps(limit: Optional[int] = None):
 	"""List recent jumps from PostgreSQL (ordered by detection time DESC)."""
 	try:
+		if limit is None:
+			limit = int(CFG.api.jumps_list_limit_default)
 		rows = await db.list_jumps(limit=limit)
 		return {"count": len(rows), "jumps": rows}
 	except Exception as e:
@@ -96,8 +152,11 @@ async def pose_run_for_jump_by_event_id(event_id: int, payload: Dict[str, Any] =
 		raise HTTPException(status_code=501, detail="Pose runner not available")
 	payload = payload or {}
 	try:
-		max_fps = payload.get("max_fps", 10)
-		out = await state.run_pose_for_jump_best_effort(int(event_id), max_fps=float(max_fps) if max_fps is not None else 10.0)
+		max_fps = payload.get("max_fps", CFG.pose.max_fps)
+		out = await state.run_pose_for_jump_best_effort(
+			int(event_id),
+			max_fps=float(max_fps) if max_fps is not None else float(CFG.pose.max_fps),
+		)
 		if out.get("ok"):
 			return out
 		raise HTTPException(status_code=400, detail=out.get("error") or "pose run failed")
@@ -127,6 +186,11 @@ async def db_delete_jump(jump_id: int):
 	"""Delete one jump by jumps.id (jump_id). Canonical route."""
 	try:
 		out = await db.delete_jump_by_jump_id(int(jump_id))
+		if out.get("deleted"):
+			jid = int(out.get("jump_id") or int(jump_id))
+			vp = str(out.get("video_path") or "").strip()
+			clean = _cleanup_deleted_jump_artifacts([jid], [vp] if vp else [])
+			out["cleanup"] = clean
 		return out
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=f"DB delete_jump failed: {e!r}")
@@ -137,6 +201,11 @@ async def db_bulk_delete_jumps(payload: BulkDeletePayload):
 	"""Delete multiple jumps by their jump_id values. Body: { "jump_ids": [1, 2, 3, ...] }"""
 	try:
 		out = await db.delete_jumps_bulk(payload.jump_ids)
+		jump_ids = [int(x) for x in out.get("jump_ids", []) if isinstance(x, (int, str)) and str(x).strip()]
+		video_paths = [str(x) for x in out.get("video_paths", []) if str(x).strip()]
+		if jump_ids:
+			clean = _cleanup_deleted_jump_artifacts(jump_ids, video_paths)
+			out["cleanup"] = clean
 		return out
 	except HTTPException:
 		raise
@@ -231,8 +300,11 @@ async def pose_run_for_jump(jump_id: int, payload: Dict[str, Any] = None, state:
 	event_id = int(row["event_id"])
 	payload = payload or {}
 	try:
-		max_fps = payload.get("max_fps", 10)
-		out = await state.run_pose_for_jump_best_effort(event_id, max_fps=float(max_fps) if max_fps is not None else 10.0)
+		max_fps = payload.get("max_fps", CFG.pose.max_fps)
+		out = await state.run_pose_for_jump_best_effort(
+			event_id,
+			max_fps=float(max_fps) if max_fps is not None else float(CFG.pose.max_fps),
+		)
 		if out.get("ok"):
 			return out
 		raise HTTPException(status_code=400, detail=out.get("error") or "pose run failed")

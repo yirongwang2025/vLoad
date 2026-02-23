@@ -1,6 +1,8 @@
 {
   "database": {
-    "url": "postgresql://vload_user:YOUR_PASSWORD@localhost:5432/vload"
+    "url": "postgresql://vload_user:YOUR_PASSWORD@localhost:5432/vload",
+    "pool_min_size": 1,
+    "pool_max_size": 5
   },
   "movesense": {
     "default_device": "",
@@ -12,8 +14,21 @@
     "host": "127.0.0.1",
     "port": 9999
   },
+  "auto_connect": {
+    "imu_retry_interval_seconds": 15.0,
+    "jump_detection_enabled": true
+  },
+  "buffers": {
+    "imu_history_seconds": 60.0,
+    "frame_history_seconds": 120.0,
+    "jump_sample_queue_maxsize": 2000,
+    "jump_events_maxlen": 1000
+  },
   "jobs": {
     "jump_clip_jobs_dir": "data/jobs/jump_clips"
+  },
+  "clip_worker": {
+    "poll_seconds": 0.5
   },
   "sessions": {
     "base_dir": "data/sessions",
@@ -24,8 +39,99 @@
     "post_jump_seconds": 3.0,
     "clip_buffer_seconds": 0.8
   },
+  "jump_detection": {
+    "window_seconds": 3.0,
+    "min_peak_height_m_s2": 3.0,
+    "min_peak_distance_s": 0.18,
+    "min_flight_time_s": 0.25,
+    "max_flight_time_s": 0.8,
+    "min_jump_height_m": 0.15,
+    "min_jump_peak_az_no_g": 3.5,
+    "min_jump_peak_gz_deg_s": 180.0,
+    "min_new_event_separation_s": 0.5,
+    "analysis_interval_s": 0.5,
+    "min_revs": 0.0,
+    "smoothing_cutoff_hz": 10.0,
+    "refine_window_s": 0.25,
+    "bias_window_start_s": 0.5,
+    "bias_window_end_s": 0.1
+  },
+  "pose": {
+    "max_fps": 10.0,
+    "model_complexity": 1,
+    "min_detection_confidence": 0.5,
+    "min_tracking_confidence": 0.5
+  },
+  "export": {
+    "default_seconds": 30.0,
+    "jump_fallback_half_window_seconds": 0.75
+  },
+  "collector": {
+    "payload_queue_maxsize": 600,
+    "calib_warmup_seconds": 1.0,
+    "calib_min_samples": 6,
+    "offset_alpha": 0.02,
+    "initial_backoff_seconds": 0.5,
+    "max_backoff_seconds": 8.0,
+    "backoff_multiplier": 1.6,
+    "connect_timeout_seconds": 25.0,
+    "notify_stale_timeout_seconds": 10.0,
+    "stat_emit_interval_seconds": 1.0,
+    "subscribe_ref_id": 99,
+    "hello_ref_id": 1
+  },
+  "ble": {
+    "scan_timeout_seconds": 7.0,
+    "connect_find_timeout_seconds": 10.0,
+    "connect_discovery_timeout_seconds": 7.0,
+    "connect_fallback_scan_timeout_seconds": 7.0,
+    "connect_refind_timeout_seconds": 5.0
+  },
+  "api": {
+    "jumps_list_limit_default": 200,
+    "jumps_list_limit_max": 1000,
+    "pages_jumps_preload_limit": 200,
+    "session_frames_limit_default": 200000
+  },
+  "http_proxy": {
+    "status_timeout_seconds": 2.0,
+    "post_timeout_seconds": 5.0,
+    "mjpeg_open_timeout_seconds": 10.0,
+    "snapshot_timeout_seconds": 3.0,
+    "mjpeg_read_chunk_bytes": 8192
+  },
+  "runtime": {
+    "overlap_tolerance_seconds": 0.1,
+    "min_window_size_seconds": 2.0,
+    "fallback_window_half_seconds": 1.0,
+    "imu_wait_poll_seconds": 0.02,
+    "imu_wait_slack_seconds": 0.5,
+    "backfill_jumps_limit": 2000,
+    "backfill_frames_limit": 500000,
+    "jump_worker_idle_sleep_seconds": 0.1,
+    "frame_sync_interval_seconds": 0.1,
+    "frame_sync_error_backoff_seconds": 0.5,
+    "video_start_wait_seconds": 3.0,
+    "video_status_poll_seconds": 0.1,
+    "video_recording_poll_delay_seconds": 0.05,
+    "video_connect_warmup_seconds": 0.2,
+    "session_video_wait_timeout_seconds": 15.0,
+    "session_video_wait_poll_seconds": 0.25,
+    "takeoff_landing_edge_guard_seconds": 0.5,
+    "clip_fallback_extra_seconds": 0.4,
+    "clip_wait_mp4_timeout_seconds": 900.0,
+    "jump_windows_history_per_session": 100,
+    "imu_rx_rate_window_seconds": 5.0,
+    "imu_history_prune_check_min_len": 100,
+    "subprocess_wait_timeout_seconds": 3.0,
+    "picamera_thread_join_timeout_seconds": 2.0,
+    "picamera_run_loop_sleep_seconds": 0.05
+  },
   "video": {
     "backend": "picamera2",
+    "default_mjpeg_fps": 15.0,
+    "recording_fps": 30,
+    "preview_jpeg_quality": 80,
     "process": {
       "enabled": false,
       "collector_host": "127.0.0.1",
