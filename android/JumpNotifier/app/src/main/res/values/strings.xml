@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">JumpNotifier</string>
+    <string name="title">vLoad Jump Notifier</string>
+    <string name="ws_url_hint">ws://&lt;server-ip&gt;:8080/ws</string>
+    <string name="ws_url_default">ws://192.168.1.100:8080/ws</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="status_disconnected">Status: disconnected</string>
+    <string name="status_connecting">Status: connecting…</string>
+    <string name="status_connected">Status: connected</string>
+</resources>
