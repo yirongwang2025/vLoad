@@ -1,6 +1,6 @@
-# vLoad – Movesense IMU Web Monitor & Jump Detection
+# P2Skating – Movesense IMU Web Monitor & Jump Detection
 
-vLoad is a FastAPI-based web application for **real-time monitoring of Movesense IMU sensors** and **figure-skating jump detection** based on IMU9 data. It combines BLE streaming, video recording, IMU-based jump detection, and video clip extraction into a single workflow.
+P2Skating is a FastAPI-based web application for **real-time monitoring of Movesense IMU sensors** and **figure-skating jump detection** based on IMU9 data. It combines BLE streaming, video recording, IMU-based jump detection, and video clip extraction into a single workflow.
 
 ---
 
@@ -190,6 +190,8 @@ vLoad is a FastAPI-based web application for **real-time monitoring of Movesense
 ## Configuration
 
 Runtime settings are read from **`config.json`** in the repo root. Copy `config.example.json` to `config.json` and edit.
+
+Software version is tracked in the repo-root **`VERSION`** file and exposed at **`GET /api/version`**.
 
 | Section | Key | Description |
 |---------|-----|-------------|

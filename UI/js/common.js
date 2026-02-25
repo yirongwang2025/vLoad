@@ -1,5 +1,5 @@
 /**
- * vLoad shared UI – API helpers, nav, optional logger and WebSocket.
+ * P2Skating shared UI – API helpers, nav, optional logger and WebSocket.
  * Include before page scripts: <script src="/static/js/common.js"></script>
  */
 
@@ -13,6 +13,7 @@
     { id: 'skaters', href: '/skaters', label: 'Skater Management' },
     { id: 'coaches', href: '/coaches', label: 'Coach Management' },
   ];
+  const DEFAULT_APP_NAME = 'P2Skating';
 
   /**
    * Renders the shared top nav into the given container.
@@ -29,8 +30,23 @@
       const cls = link.id === active ? 'active' : '';
       html += '<a href="' + escapeHtml(link.href) + '"' + (cls ? ' class="' + cls + '"' : '') + '>' + escapeHtml(link.label) + '</a>';
     });
+    html += '<span class="navMeta" id="appMeta">' + escapeHtml(DEFAULT_APP_NAME) + '</span>';
     html += '</div>';
     el.innerHTML = html;
+    updateAppMeta();
+  }
+
+  async function updateAppMeta() {
+    const metaEl = document.getElementById('appMeta');
+    if (!metaEl) return;
+    try {
+      const info = await apiGet('/api/version');
+      const name = (info && info.name) ? String(info.name) : DEFAULT_APP_NAME;
+      const version = (info && info.version) ? String(info.version) : '';
+      metaEl.textContent = version ? (name + ' v' + version) : name;
+    } catch (e) {
+      metaEl.textContent = DEFAULT_APP_NAME;
+    }
   }
 
   function escapeHtml(text) {

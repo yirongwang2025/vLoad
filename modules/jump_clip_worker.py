@@ -15,7 +15,6 @@ from modules.config import get_config
 from modules.video_backend import get_video_backend_for_tools
 from modules.video_tools import cut_h264_clip_to_mp4_best_effort, extract_mp4_frame_times, probe_mp4_stream_info
 
-
 def _safe_read_json(path: Path) -> Dict[str, Any]:
 	try:
 		return json.loads(path.read_text(encoding="utf-8"))

@@ -242,6 +242,20 @@ CFG = get_config()
 DEVICE = (CFG.movesense.default_device or "").strip()  # UI default only
 MODE = (CFG.movesense.default_mode or "IMU9").strip()  # "IMU6" or "IMU9"
 RATE = int(CFG.movesense.default_rate or 104)
+APP_NAME = "P2Skating"
+APP_VERSION_FILE = Path(__file__).resolve().parent / "VERSION"
+
+
+def _read_app_version() -> str:
+	"""Return software version from VERSION file (fallback: 0.1.0)."""
+	try:
+		if APP_VERSION_FILE.exists():
+			v = APP_VERSION_FILE.read_text(encoding="utf-8").strip()
+			if v:
+				return v
+	except Exception:
+		pass
+	return "0.1.0"
 
 # IMU collector / UDP (config only; runtime state lives in AppState)
 IMU_UDP_HOST = (CFG.imu_udp.host or "127.0.0.1").strip()
@@ -354,6 +368,21 @@ async def _auto_connect_loop(st: AppState) -> None:
 			hist_len = len(st.imu_history) if st.imu_history else 0
 			if (last_t is not None and last_t > 0) or hist_len > 0:
 				st.jump_detection_enabled = bool(CFG.auto_connect.jump_detection_enabled)
+				# Auto-connect can enable detection without hitting /detection/start.
+				# Ensure we also have an active recording session for clip generation.
+				if st.jump_detection_enabled and st.session_id is None and st.detection_session_id is None:
+					try:
+						sid = time.strftime("%Y%m%d_%H%M%S") + "_detect"
+						resp = await session_start(SessionStartPayload(session_id=sid), state=st)
+						resolved_sid = (
+							(resp.get("session_id") if isinstance(resp, dict) else None)
+							or st.session_id
+							or sid
+						)
+						st.detection_session_id = str(resolved_sid)
+					except Exception as e:
+						if st.log_to_clients:
+							st.log_to_clients(f"[AutoConnect] Could not auto-start detection session: {e!r}")
 				if st.log_to_clients:
 					st.log_to_clients(
 						f"[AutoConnect] IMU connected successfully (detection={'on' if st.jump_detection_enabled else 'off'})"
@@ -1083,11 +1112,13 @@ async def _jump_worker_loop(st: AppState) -> None:
 					base_window_start = min(t_takeoff_val - edge_guard, t_peak_val - pre_jump_s)
 					base_window_end = max(t_landing_val + edge_guard, t_peak_val + post_jump_s)
 					
+					active_session_id = st.session_id or st.detection_session_id
+
 					# Ensure window uniqueness: check for overlaps with existing jumps in same session
 					# and adjust boundaries to avoid overlap
 					window_start, window_end = _ensure_unique_jump_window(
 						st,
-						st.session_id,
+						active_session_id,
 						event_id,
 						base_window_start,
 						base_window_end,
@@ -1096,7 +1127,8 @@ async def _jump_worker_loop(st: AppState) -> None:
 					ann = st.jump_annotations.get(event_id) or {}
 					jump_for_db = dict(record)
 					# Link to current recording session (if any) so jumps can be played back.
-					jump_for_db["session_id"] = st.session_id
+					# Capture at scheduling time to avoid race with later state mutations.
+					jump_for_db["session_id"] = active_session_id
 					jump_for_db["t_start"] = window_start
 					jump_for_db["t_end"] = window_end
 					# Persist immediately on detection. Any heavy post-processing (ffmpeg clip cutting,
@@ -1113,6 +1145,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 						window_end_arg: float,
 						event_id_arg: int,
 						t_peak_val_arg: float,
+						session_id_arg: Optional[str],
 					) -> None:
 						# Critical: at t_peak time we usually DO NOT yet have the future IMU samples.
 						# Wait briefly for the stream to advance so we can persist the full requested window.
@@ -1160,6 +1193,19 @@ async def _jump_worker_loop(st: AppState) -> None:
 								f"[DB] Inserted jump: event_id={event_id_arg}, jump_id={jump_id}, samples={len(window_samples)} "
 								f"(window={window_start_arg:.3f}->{window_end_arg:.3f})"
 							)
+							# Notify websocket clients only after jump row is persisted.
+							if st_arg.manager is not None:
+								asyncio.create_task(
+									st_arg.manager.broadcast_json(
+										{
+											"type": "jump_saved",
+											"event_id": int(event_id_arg),
+											"jump_id": int(jump_id),
+											"session_id": str(session_id_arg or ""),
+											"t_peak": float(t_peak_val_arg),
+										}
+									)
+								)
 						except Exception as e:
 							st_arg.dbg["db_last_insert_error"] = repr(e)
 							st_arg.log_to_clients(f"[DB] insert_jump_with_imu failed for event_id={event_id_arg}: {e!r}")
@@ -1173,7 +1219,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 							clip_start_host = float(window_start_arg) - clip_buffer_s
 							clip_end_host = float(window_end_arg) + clip_buffer_s
 							clip_duration = clip_end_host - clip_start_host
-							base_dir = Path(st_arg.cfg.sessions.base_dir) / str(st_arg.session_id or "")
+							base_dir = Path(st_arg.cfg.sessions.base_dir) / str(session_id_arg or "")
 							mp4_path = base_dir / "video.mp4"
 							h264_path = base_dir / "video.h264"
 							# Debug logging for clip length issues
@@ -1192,7 +1238,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 							{
 								"jump_id": int(jump_id),
 								"event_id": int(event_id_arg),
-								"session_id": str(st_arg.session_id or ""),
+								"session_id": str(session_id_arg or ""),
 								"clip_start_host": float(clip_start_host),
 								"clip_end_host": float(clip_end_host),
 								"video_fps": int(st_arg.cfg.video.recording_fps),
@@ -1221,6 +1267,7 @@ async def _jump_worker_loop(st: AppState) -> None:
 							we_,
 							int(event_id),
 							tp_,
+							active_session_id,
 						)
 					)
 				except Exception as e:
@@ -1588,9 +1635,14 @@ async def start_jump_detection(state: AppState = Depends(get_state)):
 	if state.detection_session_id is None:
 		sid = time.strftime("%Y%m%d_%H%M%S") + "_detect"
 		try:
-			await session_start(SessionStartPayload(session_id=sid), state=state)
-			state.detection_session_id = sid
-			state.log_to_clients(f"[Session] Auto-started recording session for detection: {sid}")
+			resp = await session_start(SessionStartPayload(session_id=sid), state=state)
+			resolved_sid = (
+				(resp.get("session_id") if isinstance(resp, dict) else None)
+				or state.session_id
+				or sid
+			)
+			state.detection_session_id = str(resolved_sid)
+			state.log_to_clients(f"[Session] Auto-started recording session for detection: {state.detection_session_id}")
 		except HTTPException as e:
 			state.detection_session_id = None
 			state.log_to_clients(f"[Session] Auto-start for detection failed: {e.detail}")
@@ -1686,6 +1738,12 @@ async def get_config_route(state: AppState = Depends(get_state)):
 	Return current jump detection configuration.
 	"""
 	return {"jump": state.jump_config}
+
+
+@app.get("/api/version")
+async def get_app_version():
+	"""Return product name + software version for UI and tooling."""
+	return {"name": APP_NAME, "version": _read_app_version()}
 
 
 @app.post("/config")

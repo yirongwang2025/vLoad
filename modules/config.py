@@ -88,6 +88,11 @@ class JumpDetectionConfig:
 	min_jump_peak_az_no_g: float = 3.5
 	min_jump_peak_gz_deg_s: float = 180.0
 	min_new_event_separation_s: float = 0.5
+	# Temporal spacing guards for event geometry (seconds).
+	min_takeoff_to_peak_s: float = 0.02
+	max_takeoff_to_peak_s: float = 0.80
+	min_peak_to_landing_s: float = 0.02
+	max_peak_to_landing_s: float = 0.80
 	min_revs: float = 0.0
 	analysis_interval_s: float = 0.5
 	smoothing_cutoff_hz: float = 10.0
@@ -390,6 +395,10 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
 	jd_min_az = _as_float(_deep_get(raw, ["jump_detection", "min_jump_peak_az_no_g"], 3.5), 3.5)
 	jd_min_gz = _as_float(_deep_get(raw, ["jump_detection", "min_jump_peak_gz_deg_s"], 180.0), 180.0)
 	jd_min_sep = _as_float(_deep_get(raw, ["jump_detection", "min_new_event_separation_s"], 0.5), 0.5)
+	jd_min_to_peak = _as_float(_deep_get(raw, ["jump_detection", "min_takeoff_to_peak_s"], 0.02), 0.02)
+	jd_max_to_peak = _as_float(_deep_get(raw, ["jump_detection", "max_takeoff_to_peak_s"], 0.80), 0.80)
+	jd_min_peak_to_land = _as_float(_deep_get(raw, ["jump_detection", "min_peak_to_landing_s"], 0.02), 0.02)
+	jd_max_peak_to_land = _as_float(_deep_get(raw, ["jump_detection", "max_peak_to_landing_s"], 0.80), 0.80)
 	jd_min_revs = _as_float(_deep_get(raw, ["jump_detection", "min_revs"], 0.0), 0.0)
 	jd_interval = _as_float(_deep_get(raw, ["jump_detection", "analysis_interval_s"], 0.5), 0.5)
 	jd_smoothing_cutoff = _as_float(_deep_get(raw, ["jump_detection", "smoothing_cutoff_hz"], 10.0), 10.0)
@@ -553,6 +562,10 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
 			min_jump_peak_az_no_g=max(0.0, float(jd_min_az)),
 			min_jump_peak_gz_deg_s=max(0.0, float(jd_min_gz)),
 			min_new_event_separation_s=max(0.0, float(jd_min_sep)),
+			min_takeoff_to_peak_s=max(0.0, float(jd_min_to_peak)),
+			max_takeoff_to_peak_s=max(max(0.0, float(jd_min_to_peak)), float(jd_max_to_peak)),
+			min_peak_to_landing_s=max(0.0, float(jd_min_peak_to_land)),
+			max_peak_to_landing_s=max(max(0.0, float(jd_min_peak_to_land)), float(jd_max_peak_to_land)),
 			min_revs=max(0.0, float(jd_min_revs)),
 			analysis_interval_s=max(0.05, float(jd_interval)),
 			smoothing_cutoff_hz=max(0.1, float(jd_smoothing_cutoff)),
@@ -658,6 +671,10 @@ def get_jump_detection_defaults(cfg: Optional[AppConfig] = None) -> Dict[str, fl
 		"min_jump_peak_az_no_g": float(jd.min_jump_peak_az_no_g),
 		"min_jump_peak_gz_deg_s": float(jd.min_jump_peak_gz_deg_s),
 		"min_new_event_separation_s": float(jd.min_new_event_separation_s),
+		"min_takeoff_to_peak_s": float(jd.min_takeoff_to_peak_s),
+		"max_takeoff_to_peak_s": float(jd.max_takeoff_to_peak_s),
+		"min_peak_to_landing_s": float(jd.min_peak_to_landing_s),
+		"max_peak_to_landing_s": float(jd.max_peak_to_landing_s),
 		"analysis_interval_s": float(jd.analysis_interval_s),
 		"min_revs": float(jd.min_revs),
 		"smoothing_cutoff_hz": float(jd.smoothing_cutoff_hz),

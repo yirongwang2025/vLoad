@@ -86,6 +86,10 @@ class JumpDetectorRealtime:
 		self.min_jump_peak_az_no_g: float = 3.5
 		self.min_jump_peak_gz_deg_s: float = 180.0
 		self.min_new_event_separation_s: float = 0.5
+		self.min_takeoff_to_peak_s: float = 0.02
+		self.max_takeoff_to_peak_s: float = 0.80
+		self.min_peak_to_landing_s: float = 0.02
+		self.max_peak_to_landing_s: float = 0.80
 		# Step 2.3: only treat events with at least this many revolutions as real jumps.
 		# Uses revolutions_est computed in compute_window_metrics (Step 2.2).
 		self.min_revs: float = 0.0
@@ -227,6 +231,26 @@ class JumpDetectorRealtime:
 					except Exception:
 						pass
 					self._last_debug_diag_t = now_wall
+				# Temporal-spacing filter for takeoff/peak/landing geometry.
+				spacing_filtered: List[Dict[str, Any]] = []
+				for ev in candidates:
+					try:
+						t_takeoff = float(ev.get("t_takeoff", 0.0))
+						t_peak = float(ev.get("t_peak", t_takeoff))
+						t_landing = float(ev.get("t_landing", t_peak))
+					except (TypeError, ValueError):
+						continue
+					d_tp = t_peak - t_takeoff
+					d_pl = t_landing - t_peak
+					if (
+						d_tp < float(self.min_takeoff_to_peak_s)
+						or d_tp > float(self.max_takeoff_to_peak_s)
+						or d_pl < float(self.min_peak_to_landing_s)
+						or d_pl > float(self.max_peak_to_landing_s)
+					):
+						continue
+					spacing_filtered.append(ev)
+				candidates = spacing_filtered
 				# Step 2.3: filter by minimum revolutions (if available).
 				if self.min_revs and self.min_revs > 0.0:
 					filtered: List[Dict[str, Any]] = []
@@ -238,19 +262,17 @@ class JumpDetectorRealtime:
 						if rev_est >= float(self.min_revs):
 							filtered.append(ev)
 					candidates = filtered
-				# Additional debouncing: filter by last emitted takeoff time (consistent with select_jump_events).
-				# This prevents duplicate emissions across overlapping analysis cycles.
+				# Additional debouncing: filter by last emitted PEAK time.
+				# Using t_takeoff here can let near-duplicate events pass when takeoff
+				# estimates drift but the physical peak is the same.
 				for ev in candidates:
-					t_takeoff = float(ev.get("t_takeoff", ev.get("t_peak", 0.0)))
-					# Use takeoff time for consistency with select_jump_events separation logic
+					t_peak = float(ev.get("t_peak", ev.get("t_takeoff", 0.0)))
 					if (
-						t_takeoff - self._last_emitted_peak_t
+						t_peak - self._last_emitted_peak_t
 						>= self.min_new_event_separation_s
 					):
 						new_events.append(ev)
-						# Update to takeoff time (not t_peak) for consistent separation tracking
-						self._last_emitted_peak_t = t_takeoff
-
+						self._last_emitted_peak_t = t_peak
 				for ev in new_events:
 					# Optional Step 2.2 fields
 					rev_est = ev.get("revolutions_est", None)
