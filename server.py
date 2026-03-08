@@ -203,6 +203,40 @@ def _maybe_schedule_pose_for_jump(event_id: int) -> None:
 		except Exception:
 			pass
 
+
+async def _tag_last_jump_from_signal(
+	signal_t: float,
+	source: str = "ble_button",
+	max_age_s: float = 15.0,
+) -> Dict[str, Any]:
+	"""
+	Tag the latest jump before a button signal timestamp.
+	Used by BLE/button integrations that provide asynchronous tag events.
+	"""
+	try:
+		t_sig = float(signal_t)
+	except Exception:
+		t_sig = float(time.time())
+	src = (str(source or "ble_button").strip() or "ble_button")
+	try:
+		out = await db.tag_latest_jump_before(
+			signal_t=t_sig,
+			source=src,
+			tag_token="[[TAGGED]]",
+			max_age_s=float(max_age_s) if max_age_s is not None else None,
+		)
+		if out.get("ok"):
+			_log_to_clients(
+				f"[Tag] source={src} tagged jump_id={out.get('jump_id')} "
+				f"event_id={out.get('event_id')} signal_t={t_sig:.3f}"
+			)
+		else:
+			_log_to_clients(f"[Tag] source={src} no jump tagged ({out.get('error')}) signal_t={t_sig:.3f}")
+		return out
+	except Exception as e:
+		_log_to_clients(f"[Tag] source={src} tag_last failed: {e!r}")
+		return {"ok": False, "error": repr(e)}
+
 # UI directory path
 UI_DIR = Path(__file__).parent / "UI"
 
@@ -451,6 +485,7 @@ async def lifespan(app: FastAPI):
 		app_state.enqueue_jump_clip_job = _enqueue_jump_clip_job
 		app_state.run_pose_for_jump_best_effort = _run_pose_for_jump_best_effort
 		app_state.maybe_schedule_pose_for_jump = _maybe_schedule_pose_for_jump
+		app_state.tag_last_jump_from_signal = _tag_last_jump_from_signal
 		app_state.count_clip_jobs_pending = _count_clip_jobs_pending
 		app_state.count_clip_jobs_done = _count_clip_jobs_done
 		app_state.count_clip_jobs_failed = _count_clip_jobs_failed
@@ -510,6 +545,37 @@ async def lifespan(app: FastAPI):
 							st.dbg["collector_rx_rate_hz_5s"] = msg.get("rx_rate_hz_5s")
 						if "notify_stale_s" in msg:
 							st.dbg["collector_notify_stale_s"] = msg.get("notify_stale_s")
+					except Exception:
+						pass
+					return
+
+				# Button/tag signal from collector or external UDP sender.
+				if isinstance(msg, dict) and msg.get("type") in ("button_tag", "ble_button", "button"):
+					try:
+						pressed = msg.get("pressed")
+						if pressed is False:
+							return
+						signal_t = msg.get("t_host", time.time())
+						source = str(msg.get("source") or msg.get("type") or "ble_button")
+						max_age_s = msg.get("max_age_s", 15.0)
+						if st.tag_last_jump_from_signal:
+							asyncio.create_task(
+								st.tag_last_jump_from_signal(
+									float(signal_t),
+									source=source,
+									max_age_s=float(max_age_s),
+								)
+							)
+						if st.manager:
+							asyncio.create_task(
+								st.manager.broadcast_json(
+									{
+										"type": "button_tag_signal",
+										"source": source,
+										"t_host": float(signal_t),
+									}
+								)
+							)
 					except Exception:
 						pass
 					return

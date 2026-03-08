@@ -58,6 +58,7 @@ class AppState:
 	count_clip_jobs_done: Any = None
 	count_clip_jobs_failed: Any = None
 	read_last_clip_job_error: Any = None
+	tag_last_jump_from_signal: Any = None
 
 	# Pose job tracking
 	pose_jobs_inflight: Set[int]

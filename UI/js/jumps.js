@@ -8,6 +8,7 @@ const logBox = root.querySelector('#logBox');
 const jumpListEl = root.querySelector('#jumpList');
 const refreshBtn = root.querySelector('#refreshBtn');
 const dbStatus = root.querySelector('#dbStatus');
+const taggedOnlyFilter = root.querySelector('#taggedOnlyFilter');
 
 const jumpNameInput = root.querySelector('#jumpNameInput');
 const jumpNote = root.querySelector('#jumpNote');
@@ -56,6 +57,7 @@ const ctxGyro = canvasGyro ? canvasGyro.getContext('2d') : null;
 const ctxMag = canvasMag ? canvasMag.getContext('2d') : null;
 
 const maxJumpItems = 200;
+const TAG_TOKEN = '[[TAGGED]]';
 const jumps = [];  // list rows from /db/jumps
 let selectedIndex = -1;
 let selectionAnchorIndex = -1; // for shift-click range
@@ -99,6 +101,12 @@ function addLog(line) {
     logBox.textContent += `[${ts}] ${line}\n`;
     logBox.scrollTop = logBox.scrollHeight;
   } catch (e) { /* avoid breaking if log fails */ }
+}
+
+function isTaggedJump(row) {
+  if (!row) return false;
+  const note = String(row.note || '');
+  return note.includes(TAG_TOKEN);
 }
 
 ws.onopen = () => addLog('WebSocket connected');
@@ -667,7 +675,7 @@ async function loadJumpList() {
   if (dbStatus) dbStatus.textContent = 'Loading...';
   try {
     let list = [];
-    const serverRendered = jumpListEl.children.length > 0 && jumpListEl.children[0].hasAttribute && jumpListEl.children[0].hasAttribute('data-jump-id');
+    const serverRendered = false;
     addLog('serverRendered=' + serverRendered + ' children=' + jumpListEl.children.length);
     if (serverRendered) {
       // Build list from server-rendered <li data-jump-id="..." data-event-id="..." data-name="..." data-t-peak="...">
@@ -693,6 +701,11 @@ async function loadJumpList() {
       const data = await resp.json();
       list = data.jumps || [];
     }
+    const taggedOnly = !!(taggedOnlyFilter && taggedOnlyFilter.checked);
+    if (taggedOnly) {
+      list = list.filter(isTaggedJump);
+    }
+
     jumps.length = 0;
     if (!serverRendered) {
       jumpListEl.innerHTML = '';
@@ -745,7 +758,8 @@ function _renderJumpListItemText(row) {
   if (!row) return '';
   const name = row.name || (typeof row.event_id === 'number' ? ('Jump ' + row.event_id) : 'Jump');
   const timeLabel = formatTimeFromEpoch(row.t_peak);
-  return name + (timeLabel ? (' (' + timeLabel + ')') : '');
+  const taggedLabel = isTaggedJump(row) ? ' [TAGGED]' : '';
+  return name + taggedLabel + (timeLabel ? (' (' + timeLabel + ')') : '');
 }
 
 function _updateJumpListItemByIndex(i) {
@@ -1854,5 +1868,10 @@ async function handleDeleteJump() {
 // Initial
 redrawPlots(null);
 loadJumpList();
+if (taggedOnlyFilter) {
+  taggedOnlyFilter.addEventListener('change', () => {
+    loadJumpList();
+  });
+}
   }
 };

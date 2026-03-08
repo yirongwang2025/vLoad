@@ -1,6 +1,6 @@
 # JumpNotifier (Android)
 
-Simple Android app that listens for vLoad websocket events and shows a phone notification when a jump is persisted to DB.
+Simple Android app that listens for P2Skating websocket events and shows a phone notification when a jump is persisted to DB.
 
 ## Event used
 
@@ -25,3 +25,4 @@ Server now broadcasts this websocket message after DB insert succeeds:
 5. Tap **Connect**.
 
 When a jump is detected **and saved to database**, the app logs the event and shows a local notification.
+

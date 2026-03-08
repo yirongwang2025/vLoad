@@ -1,6 +1,7 @@
 """Jumps DB API and pose. Routes: /db/jumps* (canonical by jump_id), /db/status, /pose/jumps/*/run."""
 from pathlib import Path
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -12,6 +13,7 @@ from schemas.requests import BulkDeletePayload, JumpMarksPayload
 
 router = APIRouter(tags=["api_jumps"])
 CFG = get_config()
+TAG_TOKEN = "[[TAGGED]]"
 
 
 def _remove_file_if_exists(path: Path) -> bool:
@@ -287,6 +289,69 @@ async def db_set_jump_pose_metrics(jump_id: int, payload: Dict[str, Any]):
 		raise
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=f"DB pose_metrics failed: {e!r}")
+
+
+@router.post("/db/jumps/{jump_id}/tag")
+async def db_tag_jump(jump_id: int, payload: Dict[str, Any] = None):
+	"""
+	Mark a jump as tagged by appending a non-destructive tag marker into note.
+	This preserves any existing user note text.
+	"""
+	payload = payload or {}
+	source = str(payload.get("source") or "unknown").strip() or "unknown"
+	try:
+		row = await db.get_jump_with_imu_by_jump_id(int(jump_id))
+		if not row:
+			raise HTTPException(status_code=404, detail="Jump not found")
+		name = row.get("name")
+		note = str(row.get("note") or "")
+		if TAG_TOKEN in note:
+			return {"ok": True, "jump_id": int(jump_id), "tagged": True, "already_tagged": True}
+		stamp = datetime.now(timezone.utc).isoformat()
+		tag_line = f"{TAG_TOKEN} source={source} at={stamp}"
+		merged_note = (note.rstrip() + "\n\n" + tag_line).strip() if note.strip() else tag_line
+		await db.update_annotation_by_jump_id(int(jump_id), name=(str(name) if name is not None else None), note=merged_note)
+		return {"ok": True, "jump_id": int(jump_id), "tagged": True, "already_tagged": False}
+	except HTTPException:
+		raise
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=f"DB tag jump failed: {e!r}")
+
+
+@router.post("/db/jumps/tag_last")
+async def db_tag_last_jump(payload: Dict[str, Any] = None):
+	"""
+	Tag the latest jump that occurred before a signal timestamp.
+	Intended for external button/gateway integrations.
+	"""
+	payload = payload or {}
+	source = str(payload.get("source") or "ble_button").strip() or "ble_button"
+	max_age_s = payload.get("max_age_s", 15.0)
+	signal_t = payload.get("signal_t")
+	if signal_t is None:
+		signal_t = datetime.now(timezone.utc).timestamp()
+	try:
+		signal_t_f = float(signal_t)
+	except Exception:
+		raise HTTPException(status_code=400, detail="signal_t must be a float epoch seconds")
+	try:
+		max_age_f = float(max_age_s) if max_age_s is not None else None
+	except Exception:
+		max_age_f = None
+	try:
+		out = await db.tag_latest_jump_before(
+			signal_t=signal_t_f,
+			source=source,
+			tag_token=TAG_TOKEN,
+			max_age_s=max_age_f,
+		)
+		if not out.get("ok"):
+			raise HTTPException(status_code=404, detail=out.get("error") or "no jump tagged")
+		return out
+	except HTTPException:
+		raise
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=f"DB tag_last failed: {e!r}")
 
 
 @router.post("/pose/jumps/{jump_id}/run")

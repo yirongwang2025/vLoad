@@ -2,6 +2,7 @@
 import logging
 import math
 import statistics
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from modules.config import get_config
@@ -346,6 +347,86 @@ async def update_annotation_by_jump_id(jump_id: int, name: Optional[str], note: 
 			note,
 			jid,
 		)
+
+
+async def tag_latest_jump_before(
+	signal_t: float,
+	source: str = "ble_button",
+	tag_token: str = "[[TAGGED]]",
+	max_age_s: Optional[float] = None,
+) -> Dict[str, Any]:
+	"""
+	Tag the latest jump with t_peak <= signal_t.
+	Optionally restrict to recent jumps within max_age_s.
+	"""
+	pool = get_pool()
+	if pool is None:
+		return {"ok": False, "error": "DB not configured", "disabled": True}
+
+	try:
+		t_sig = float(signal_t)
+	except Exception:
+		return {"ok": False, "error": "signal_t must be a float epoch seconds"}
+
+	src = (str(source or "ble_button").strip() or "ble_button")
+	max_age = None
+	if max_age_s is not None:
+		try:
+			max_age = max(0.0, float(max_age_s))
+		except Exception:
+			max_age = None
+
+	async with pool.acquire() as conn:
+		row = await conn.fetchrow(
+			"""
+			SELECT id, event_id, name, note, EXTRACT(EPOCH FROM t_peak) AS t_peak_s
+			FROM jumps
+			WHERE t_peak <= to_timestamp($1)
+			  AND ($2::double precision IS NULL OR t_peak >= to_timestamp($1 - $2))
+			ORDER BY t_peak DESC, created_at DESC
+			LIMIT 1;
+			""",
+			t_sig,
+			max_age,
+		)
+		if not row:
+			return {"ok": False, "error": "no jump before signal time"}
+
+		jid = int(row["id"])
+		note = str(row["note"] or "")
+		already = bool(tag_token and tag_token in note)
+		if already:
+			return {
+				"ok": True,
+				"jump_id": jid,
+				"event_id": row["event_id"],
+				"tagged": True,
+				"already_tagged": True,
+				"signal_t": float(t_sig),
+				"t_peak": float(row["t_peak_s"]) if row["t_peak_s"] is not None else None,
+			}
+
+		stamp = datetime.now(timezone.utc).isoformat()
+		tag_line = f"{tag_token} source={src} signal_t={t_sig:.6f} at={stamp}"
+		merged_note = (note.rstrip() + "\n\n" + tag_line).strip() if note.strip() else tag_line
+		await conn.execute(
+			"""
+			UPDATE jumps
+			SET note = $1
+			WHERE id = $2;
+			""",
+			merged_note,
+			jid,
+		)
+		return {
+			"ok": True,
+			"jump_id": jid,
+			"event_id": row["event_id"],
+			"tagged": True,
+			"already_tagged": False,
+			"signal_t": float(t_sig),
+			"t_peak": float(row["t_peak_s"]) if row["t_peak_s"] is not None else None,
+		}
 
 
 async def update_jump_video_mark(event_id: int, which: str, t_host: Optional[float], t_video: Optional[float]) -> Dict[str, Any]:
