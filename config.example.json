@@ -58,7 +58,12 @@
     "smoothing_cutoff_hz": 10.0,
     "refine_window_s": 0.25,
     "bias_window_start_s": 0.5,
-    "bias_window_end_s": 0.1
+    "bias_window_end_s": 0.1,
+    "shape_min_neg_az_no_g": -1.5,
+    "shape_min_mid_neg_fraction": 0.35,
+    "shape_impact_dominance_ratio": 3.0,
+    "shape_impact_mid_neg_fraction_max": 0.6,
+    "context_dedup_window_s": 0.9
   },
   "pose": {
     "max_fps": 10.0,

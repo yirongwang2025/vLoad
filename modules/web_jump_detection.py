@@ -386,6 +386,8 @@ def compute_window_metrics(
 	  - `peak_gz`: max |ω_z| within the window.
 	  - `t_peak_gz`: time at which |ω_z| is maximal in the window
 	        (approximate rotation-peak timing).
+	  - Shape features used by later rejection/cleanup:
+	      `peak_az_pos`, `peak_az_neg`, `mid_neg_fraction`.
 	"""
 	if not windows:
 		return []
@@ -434,17 +436,45 @@ def compute_window_metrics(
 
 		# Compute max values and track peak index in single pass
 		peak_az_no_g = 0.0
+		peak_az_pos = float("-inf")
+		peak_az_neg = float("inf")
 		peak_gz = 0.0
 		peak_gz_rel_idx = 0
 		for v in seg_az:
-			abs_v = abs(float(v))
+			fv = float(v)
+			abs_v = abs(fv)
 			if abs_v > peak_az_no_g:
 				peak_az_no_g = abs_v
+			if fv > peak_az_pos:
+				peak_az_pos = fv
+			if fv < peak_az_neg:
+				peak_az_neg = fv
 		for idx, v in enumerate(seg_gz):
 			abs_v = abs(float(v))
 			if abs_v > peak_gz:
 				peak_gz = abs_v
 				peak_gz_rel_idx = idx
+		if not math.isfinite(peak_az_pos):
+			peak_az_pos = 0.0
+		if not math.isfinite(peak_az_neg):
+			peak_az_neg = 0.0
+		# Fraction of the middle portion that is clearly in "flight-like" unloading.
+		# Using a modest threshold avoids overfitting to one athlete/session.
+		seg_len = len(seg_az)
+		mid_lo = int(0.30 * max(0, seg_len - 1))
+		mid_hi = int(0.70 * max(0, seg_len - 1))
+		if mid_hi < mid_lo:
+			mid_hi = mid_lo
+		mid_seg = seg_az[mid_lo : mid_hi + 1]
+		if mid_seg:
+			neg_thr = -2.0
+			mid_neg_count = 0
+			for v in mid_seg:
+				if float(v) <= neg_thr:
+					mid_neg_count += 1
+			mid_neg_fraction = float(mid_neg_count) / float(len(mid_seg))
+		else:
+			mid_neg_fraction = 0.0
 		peak_gz_idx = i0 + peak_gz_rel_idx
 		t_peak_gz = float(t_series[peak_gz_idx]) if peak_gz_idx < n else float(
 			w.get("t_takeoff", 0.0)
@@ -550,6 +580,9 @@ def compute_window_metrics(
 				"underrotation": float(underrotation),
 				"underrot_flag": bool(underrot_flag),
 				"peak_az_no_g": float(peak_az_no_g),
+				"peak_az_pos": float(peak_az_pos),
+				"peak_az_neg": float(peak_az_neg),
+				"mid_neg_fraction": float(mid_neg_fraction),
 				"peak_gz": float(peak_gz),
 				"t_peak_gz": t_peak_gz,
 			}
@@ -573,6 +606,8 @@ def select_jump_events(
 	Filtering:
 	  - Require minimum height, vertical impulse (peak_az_no_g) and
 	    rotation speed (peak_gz).
+	  - Reject impact-dominant window shapes without sustained unloading
+	    through the middle of flight (shape-based rejection).
 	  - Enforce a minimum separation in time between emitted jumps.
 
 	Scoring (heuristic confidence in [0, 1]):
@@ -588,12 +623,36 @@ def select_jump_events(
 		return ([], last_t_takeoff_persistent if last_t_takeoff_persistent is not None else -1e9)
 
 	# Filter by hard thresholds.
+	jd_cfg = get_config().jump_detection
+	shape_min_neg_az = float(jd_cfg.shape_min_neg_az_no_g)
+	shape_min_mid_neg_fraction = float(jd_cfg.shape_min_mid_neg_fraction)
+	shape_impact_dominance_ratio = float(jd_cfg.shape_impact_dominance_ratio)
+	shape_impact_mid_neg_fraction_max = float(jd_cfg.shape_impact_mid_neg_fraction_max)
 	candidates: List[Dict[str, float]] = []
 	for w in windows_with_metrics:
 		h = float(w.get("height", 0.0))
 		a = float(w.get("peak_az_no_g", 0.0))
 		g = float(w.get("peak_gz", 0.0))
 		if h < min_height_m or a < min_peak_az_no_g or g < min_peak_gz_deg_s:
+			continue
+		# Shape-based rejection:
+		# - Require clear unloading (negative az_no_g) and sustained mid-flight unloading.
+		# - Reject impact-dominant windows where negative spike dwarfs positive impulse
+		#   without enough sustained unloading.
+		peak_az_pos = max(0.0, float(w.get("peak_az_pos", 0.0)))
+		peak_az_neg = float(w.get("peak_az_neg", 0.0))
+		mid_neg_fraction = float(w.get("mid_neg_fraction", 0.0))
+		neg_mag = abs(min(0.0, peak_az_neg))
+		impact_dominance = neg_mag / max(1e-3, peak_az_pos)
+		has_clear_unloading = (
+			peak_az_neg <= shape_min_neg_az
+			and mid_neg_fraction >= shape_min_mid_neg_fraction
+		)
+		is_impact_dominant = (
+			impact_dominance >= shape_impact_dominance_ratio
+			and mid_neg_fraction < shape_impact_mid_neg_fraction_max
+		)
+		if (not has_clear_unloading) or is_impact_dominant:
 			continue
 		candidates.append(w)
 
@@ -609,6 +668,23 @@ def select_jump_events(
 	# Initialize with persistent value if provided, otherwise start fresh for this batch.
 	last_t_takeoff: float = last_t_takeoff_persistent if last_t_takeoff_persistent is not None else -1e9
 	min_sep = max(0.0, float(min_separation_s))
+	context_window_s = max(min_sep, float(jd_cfg.context_dedup_window_s))
+
+	def _clip01(x: float) -> float:
+		return max(0.0, min(1.0, x))
+
+	def _event_score(item: Dict[str, float], conf_v: float) -> float:
+		"""
+		Contextual de-dup score: confidence-first with small shape bonuses.
+		Used only for deciding which candidate to keep in a nearby cluster.
+		"""
+		mid_frac = _clip01(float(item.get("mid_neg_fraction", 0.0)))
+		pos_mag = max(0.0, float(item.get("peak_az_pos", 0.0)))
+		neg_mag = abs(min(0.0, float(item.get("peak_az_neg", 0.0))))
+		impact_ratio = neg_mag / max(1e-3, pos_mag)
+		impact_penalty = 0.08 * _clip01((impact_ratio - 1.5) / 2.5)
+		shape_bonus = 0.06 * mid_frac
+		return float(conf_v + shape_bonus - impact_penalty)
 
 	for w in candidates:
 		T_f = float(w.get("flight_time", 0.0))
@@ -625,9 +701,6 @@ def select_jump_events(
 
 		# Compute a confidence score based on rough nominal scales and
 		# how "centrally" the rotation peak lies within the flight.
-		def _clip01(x: float) -> float:
-			return max(0.0, min(1.0, x))
-
 		norm_h = _clip01(h / 0.6)  # ~0.6 m as a "strong" multi‑rev jump
 		norm_a = _clip01(a / 6.0)  # ~6 m/s² vertical impulse above g
 		norm_g = _clip01(g / 800.0)  # ~800°/s as nominal strong rotation
@@ -643,33 +716,38 @@ def select_jump_events(
 		# Discard very low‑confidence windows outright.
 		if conf < 0.35:
 			continue
+		cur_score = _event_score(w, conf)
 
-		# Overlap-based suppression: if this jump overlaps with a previously selected jump,
-		# keep only the one with higher confidence (prevents double-counting from landing spikes).
+		# Contextual de-duplication:
+		# If this event overlaps OR is temporally close to an already selected event,
+		# keep only the better-scoring one (confidence-first, shape-aware tie-break).
 		overlaps_with = None
 		for i, sel in enumerate(selected):
 			sel_takeoff = float(sel.get("t_takeoff", 0.0))
 			sel_landing = float(sel.get("t_landing", sel_takeoff + float(sel.get("flight_time", 0.0))))
+			sel_peak = float(sel.get("t_peak", sel.get("t_peak_gz", sel_takeoff)))
 			# Check if windows overlap (with small tolerance for edge cases)
-			if not (t_landing < sel_takeoff - 0.1 or t_takeoff > sel_landing + 0.1):
+			overlaps = not (t_landing < sel_takeoff - 0.1 or t_takeoff > sel_landing + 0.1)
+			is_temporally_near = abs(t_peak - sel_peak) <= context_window_s
+			if overlaps or is_temporally_near:
 				overlaps_with = i
 				break
 
 		if overlaps_with is not None:
-			# Found overlap: compare confidence and keep the higher one
+			# Found overlap/near-duplicate: compare scores and keep the stronger event.
 			sel = selected[overlaps_with]
 			sel_conf = float(sel.get("confidence", 0.0))
-			if conf > sel_conf:
-				# Replace lower-confidence jump with this one
+			sel_score = _event_score(sel, sel_conf)
+			if (cur_score > sel_score) or (cur_score == sel_score and conf > sel_conf):
 				event = dict(w)
 				event["confidence"] = float(conf)
 				event["t_peak"] = t_peak
 				event["rotation_phase"] = float(phase)
 				selected[overlaps_with] = event
-				# Update last_t_takeoff if this jump is later
+				# Keep persistent separation anchor at latest accepted takeoff.
 				if t_takeoff > last_t_takeoff:
 					last_t_takeoff = t_takeoff
-			# else: keep existing higher-confidence jump, skip this one
+			# else: keep existing higher-scoring jump, skip this one
 			continue
 
 		event = dict(w)

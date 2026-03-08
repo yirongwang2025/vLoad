@@ -99,6 +99,12 @@ class JumpDetectionConfig:
 	refine_window_s: float = 0.25
 	bias_window_start_s: float = 0.5
 	bias_window_end_s: float = 0.1
+	# Shape-based rejection / contextual de-dup tuning.
+	shape_min_neg_az_no_g: float = -1.5
+	shape_min_mid_neg_fraction: float = 0.35
+	shape_impact_dominance_ratio: float = 3.0
+	shape_impact_mid_neg_fraction_max: float = 0.60
+	context_dedup_window_s: float = 0.9
 
 
 @dataclass(frozen=True)
@@ -405,6 +411,23 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
 	jd_refine_window = _as_float(_deep_get(raw, ["jump_detection", "refine_window_s"], 0.25), 0.25)
 	jd_bias_start = _as_float(_deep_get(raw, ["jump_detection", "bias_window_start_s"], 0.5), 0.5)
 	jd_bias_end = _as_float(_deep_get(raw, ["jump_detection", "bias_window_end_s"], 0.1), 0.1)
+	jd_shape_min_neg = _as_float(_deep_get(raw, ["jump_detection", "shape_min_neg_az_no_g"], -1.5), -1.5)
+	jd_shape_min_mid_neg = _as_float(
+		_deep_get(raw, ["jump_detection", "shape_min_mid_neg_fraction"], 0.35),
+		0.35,
+	)
+	jd_shape_impact_ratio = _as_float(
+		_deep_get(raw, ["jump_detection", "shape_impact_dominance_ratio"], 3.0),
+		3.0,
+	)
+	jd_shape_impact_mid_neg_max = _as_float(
+		_deep_get(raw, ["jump_detection", "shape_impact_mid_neg_fraction_max"], 0.60),
+		0.60,
+	)
+	jd_context_dedup_window = _as_float(
+		_deep_get(raw, ["jump_detection", "context_dedup_window_s"], 0.9),
+		0.9,
+	)
 
 	pose_max_fps = _as_float(_deep_get(raw, ["pose", "max_fps"], 10.0), 10.0)
 	pose_model = _as_int(_deep_get(raw, ["pose", "model_complexity"], 1), 1)
@@ -572,6 +595,11 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
 			refine_window_s=max(0.01, float(jd_refine_window)),
 			bias_window_start_s=max(0.0, float(jd_bias_start)),
 			bias_window_end_s=max(0.0, float(jd_bias_end)),
+			shape_min_neg_az_no_g=min(-0.1, float(jd_shape_min_neg)),
+			shape_min_mid_neg_fraction=max(0.0, min(1.0, float(jd_shape_min_mid_neg))),
+			shape_impact_dominance_ratio=max(1.0, float(jd_shape_impact_ratio)),
+			shape_impact_mid_neg_fraction_max=max(0.0, min(1.0, float(jd_shape_impact_mid_neg_max))),
+			context_dedup_window_s=max(0.1, float(jd_context_dedup_window)),
 		),
 		pose=PoseConfig(
 			max_fps=max(1.0, float(pose_max_fps)),
@@ -681,6 +709,11 @@ def get_jump_detection_defaults(cfg: Optional[AppConfig] = None) -> Dict[str, fl
 		"refine_window_s": float(jd.refine_window_s),
 		"bias_window_start_s": float(jd.bias_window_start_s),
 		"bias_window_end_s": float(jd.bias_window_end_s),
+		"shape_min_neg_az_no_g": float(jd.shape_min_neg_az_no_g),
+		"shape_min_mid_neg_fraction": float(jd.shape_min_mid_neg_fraction),
+		"shape_impact_dominance_ratio": float(jd.shape_impact_dominance_ratio),
+		"shape_impact_mid_neg_fraction_max": float(jd.shape_impact_mid_neg_fraction_max),
+		"context_dedup_window_s": float(jd.context_dedup_window_s),
 	}
 
 
